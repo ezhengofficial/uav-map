@@ -1,3 +1,4 @@
 # Ignore parent directories
 ../data/
 ../Blocks/
+venv/
