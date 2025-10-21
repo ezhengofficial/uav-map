@@ -1,0 +1,24 @@
+{
+    "SettingsVersion": 1.2,
+    "SimMode": "Multirotor",
+    "Vehicles": {
+      "Drone1": {
+        "VehicleType": "SimpleFlight",
+        "AutoCreate": true,
+        "Sensors": {
+          "Lidar1": {
+            "SensorType": 6,
+            "Enabled": true,
+            "NumberOfChannels": 16,
+            "PointsPerSecond": 30000,
+            "Range": 60,
+            "VerticalFOVUpper": 10,
+            "VerticalFOVLower": -10,
+            "HorizontalRotationFrequency": 10,
+            "DrawDebugPoints": false
+          }
+        }
+      }
+    }
+  }
+  
