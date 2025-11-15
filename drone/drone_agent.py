@@ -4,6 +4,10 @@ import laspy
 from setup_path import SetupPath
 
 class DroneAgent:
+    '''
+    Class for one drone
+    Contains functionally for one drone
+    '''
     def __init__(self, client, drone_name, lidar_name="Lidar1"):
         self.client = client
         self.name = drone_name

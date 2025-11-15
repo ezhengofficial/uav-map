@@ -2,3 +2,9 @@
 ../data/
 ../Blocks/
 venv/
+
+__pycache__/
+Blocks/
+data/
+config/
+

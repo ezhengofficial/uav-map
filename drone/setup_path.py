@@ -8,7 +8,9 @@ import os,sys,logging
 
 #this class simply tries to see if airsim 
 class SetupPath:
-    
+    '''
+    A bunch of methods just to get path of files and stuff. 
+    '''
     @staticmethod
     def getLidarDataPath():
         '''
