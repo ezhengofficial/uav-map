@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Las (LiDAR) Viewer</title>
+  <meta name="description" content="Free online LAS viewer" />
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <link rel="stylesheet" href="/static/stylesheet.css">
+</head>
+<body>
+   <div class="navbar" >
+    <div class="dropdown">
+      <!--
+       Free online LAS viewer
+      -->
+      <input type="file" multiple class="file" id="attach_las"    style="display: none;" accept=".las" onchange="OnFileSelected(this,0)" />
+      <input type="file" multiple class="file" id="attach_xyzbin" style="display: none;" accept=".xyz" onchange="OnFileSelected(this,1)" />
+      <input type="file" multiple class="file" id="attach_xyztxt" style="display: none;" accept=".xyz, .txt" onchange="OnFileSelected(this,2)" />
+      <button class="dropbtn" id="fbtn" onclick="myFunction('fbtn','fileDropdown')">File</button>
+      <div class="dropdown-content" id="fileDropdown">
+        <button type="button"  
+            onclick="document.getElementById('attach_las').click()"
+            class="thebutton">Load Las
+        </button>
+        <button type="button"  
+            onclick="document.getElementById('attach_xyztxt').click()"
+            class="thebutton">Load XYZ (ascii)
+        </button>
+        <button type="button" 
+            id="SampleLasId"  
+            onclick="OnUIEvent1(this)"
+            class="thebutton">Try Sample...
+        </button>
+        <button type="button" 
+            id="HelpId"    
+            onclick="OpenHelp()" 
+            class="thebutton">Help
+        </button>
+      </div>
+      <!-- camera -->
+      <button class="dropbtn" id="camBtn" onclick="myFunction('camBtn','cameraDropdown')">Camera</button>
+      <div class="dropdown-content" id="cameraDropdown">
+        <button class="thebutton" id="camReset" onclick="OnUIEvent1(this)">Reset </button>
+        <!--
+        <small  class="thetext1"  id="camOr"    onclick="OnUIEvent1(this)">Orthographic</small>
+        <input type="checkbox"    id="camOrto"  onclick="OnUIEvent1(this)" title="Orthographic" id="camOrto" />
+        -->
+      </div>
+       <!-- colors -->
+      <button class="dropbtn" id="ColorsId" onclick="myFunction('ColorsId','viewDropdown')">View</button>
+      <div class="dropdown-content" id="viewDropdown">
+        <!-- rgb -->
+        <div style="color:0x333; height:5px;" ></div>
+        <label for="colrgb" class="thelabel">
+          <input type="radio" name="grp1" value="0" id="colrgbId" class="theradio" onclick="OnUIEvent1(this)">rgb
+        </label><br>
+        
+        <div style="color:0x333; height:5px;" ></div>
+        <label for="colint" class="thelabel"><input type="radio" name="grp1" value="1" id="colintId" class="theradio" onclick="OnUIEvent1(this)">intensity</label><br>
+ 
+        <div style="color:0x333; height:5px;" ></div>
+        <label for="colhtm" class="thelabel"><input type="radio" name="grp1" value="3" id="colclassId" class="theradio" onclick="OnUIEvent1(this)">classification</label><br>
+
+        <div style="color:0x333; height:5px;" ></div>
+        <label for="colhtm" class="thelabel"><input type="radio" name="grp1" value="4" id="colmix" class="theradio" onclick="OnUIEvent1(this)">geometry</label><br>
+
+        <div style="color:0x333; height:5px;" ></div>
+        <label for="colhtm" class="thelabel"><input type="radio" name="grp1" value="2" id="colhtmId" class="theradio" onclick="OnUIEvent1(this)">heightmap</label><br>
+
+        <div style="color:0x333; height:5px; width:200px" ></div>
+      </div> 
+      <small class="thetext">Fov:</small>
+      <input class="thespin" id="fovVal" onclick="OnUIEvent1(this)" type="number" min="1" max="80" value="21"/> 
+
+      <small class="thetext" title="Point size">  Size:</small>
+      <input class="thespin" id="ptSize" type="number" onclick="OnUIEvent1(this)" min="1" max="7" value="3"/> 
+
+      <small class="thetext" title="Rendering budget">Budget:</small>
+      <input class="thespin" id="budVal" onclick="OnUIEvent1(this)" type="number" min="1" max="100" value="18"/> 
+
+      <small class="thetext">DrawAll:</small>
+      <input type="checkbox"  title="Render All" id="rdAll"  onchange="OnUIEvent1(this)" checked/>
+
+      <small class="thetext">Ruler:</small>
+      <input type="checkbox"  title="Ruler" id="ruler"  onchange="OnUIEvent1(this)"/>
+
+      <input type="color" title="Background Color" id="bkcolor" value="#101010">
+      <small id="GFG" class="thetext"> </small>
+
+       </div> 
+  </div>
+
+  <div>
+    <canvas id="canvas" oncontextmenu="event.preventDefault()" ></canvas>
+  </div>
+   
+  <script type='text/javascript'>
+    var Module = {
+      canvas: (function () { return document.getElementById('canvas'); })()
+    };
+  </script>
+    <script>
+      var openedDropDownid;
+      function myFunction(parButton,dropId) {
+        if(openedDropDownid != dropId){
+          elToClose = document.getElementById(openedDropDownid);
+           if(elToClose != null){
+            if (elToClose.classList.contains('show')) {
+              elToClose.classList.remove('show');
+            }
+          }
+        }
+        parEl = document.getElementById(parButton);
+        viewportOffset = parEl.getBoundingClientRect();
+        myEl  = document.getElementById(dropId);
+        lpos = viewportOffset.left + 10;
+        myEl.style.left = lpos + "px";
+        document.getElementById(dropId).classList.toggle("show");
+        openedDropDownid = dropId;
+        UpdateColorModeUI();
+      }
+      
+      // Close the dropdown if the user clicks outside of it
+      window.onclick = function(e) {
+        if(e.target.getAttribute('id')=='canvas'){
+          var myDropdown1 = document.getElementById(openedDropDownid);
+          if(myDropdown1 != null){
+            if (myDropdown1.classList.contains('show')) {
+              myDropdown1.classList.remove('show');
+            } 
+          }  
+        }        
+      }
+
+      function OpenHelp(){
+        window.open("https://github.com/lasviewer/lasviewer.github.io");
+      }
+     </script>
+  
+     
+    <script src="/static/index.js"></script>
+    <script src="/static/js_helpers.js"></script>
+    <script src="/static/floader.js"></script>
+    </div>
+  <script>
+  Module.onRuntimeInitialized = () => {
+    console.log("WASM runtime initialized");
+    loadMergeWithCacheBust();              // safe to call now
+    setInterval(loadMergeWithCacheBust, 5000); // reload every 10s
+  };
+
+  function loadMergeWithCacheBust() {
+    const url = "/merged.las?t=" + new Date().getTime(); // bust cache
+    console.log("Requesting LAS file:", url);
+    loadFile(url); // now safe
+  }
+</script>
+
+  
+ <script async src="https://scripts.simpleanalyticscdn.com/latest.js"></script>
+ </body>
+</html>
