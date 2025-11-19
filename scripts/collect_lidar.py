@@ -1,85 +1,127 @@
-import airsim, time, os, numpy as np
+import airsim
+import time
+import numpy as np
 from pathlib import Path
 import laspy
+from datetime import datetime
 
+# -------- Config --------
+VEHICLE_NAME = "Drone1"
+LIDAR_NAME   = "Lidar1"
+HOVER_ALT    = -5.0        # z in AirSim (negative is up)
+SPEED        = 3.0         # m/s
+NUM_STEPS    = 40
+LOG_INTERVAL = 1.0         # seconds between scans
+# ------------------------
 
-SAVE = Path(__file__).resolve().parents[1] / "data" / "logs"
-SAVE.mkdir(parents=True, exist_ok=True)
+# Base logs folder
+SAVE_ROOT = Path(__file__).resolve().parents[1] / "data" / "logs"
+SAVE_ROOT.mkdir(parents=True, exist_ok=True)
 
+# Timestamped run folder, e.g. data/logs/20251118_161530
+RUN_ID   = datetime.now().strftime("%Y%m%d_%H%M%S")
+RUN_DIR  = SAVE_ROOT / RUN_ID
+RUN_DIR.mkdir(parents=True, exist_ok=True)
+print(f"[INFO] Logging LAS frames to: {RUN_DIR}")
+
+# AirSim client
 c = airsim.MultirotorClient()
 c.confirmConnection()
-c.enableApiControl(True)
-c.armDisarm(True)
+c.enableApiControl(True, VEHICLE_NAME)
+c.armDisarm(True, VEHICLE_NAME)
 
-def create_las(frame, points, colors=None,):
+
+def create_las(frame_idx: int, points_enu: np.ndarray, colors: np.ndarray | None = None) -> None:
     """
-    Create a LAS file from point cloud data
-    :param points: numpy array of shape (N, 3) with x, y, z coordinates
-    :param colors: numpy array of shape (N, 3) with RGB color data
+    Create a LAS file from point cloud data for this frame.
+
+    points_enu: (N, 3) in ENU coordinates (X=E, Y=N, Z=Up)
+    colors:     optional (N, 3) float in [0,1] RGB
     """
+    if points_enu.size == 0:
+        return
+
     header = laspy.LasHeader(point_format=3, version="1.2")
-    header.scales = np.array([0.01, 0.01, 0.01])  # 1cm precision
-    header.offsets = np.array([np.min(points[:,0]), np.min(points[:,1]), np.min(points[:,2])])
+    # 1 cm precision
+    header.scales = np.array([0.01, 0.01, 0.01])
+    header.offsets = np.array([
+        float(np.min(points_enu[:, 0])),
+        float(np.min(points_enu[:, 1])),
+        float(np.min(points_enu[:, 2])),
+    ])
 
     las = laspy.LasData(header)
-    las.x = points[:, 0]
-    las.y = points[:, 1]
-    las.z = points[:, 2]
+    las.x = points_enu[:, 0]
+    las.y = points_enu[:, 1]
+    las.z = points_enu[:, 2]
 
-    if colors is not None:
-        rgb = np.clip(colors * 65535, 0, 65535).astype(np.uint16)
-        las.red = rgb[:, 0]
-        las.green = rgb[:, 1]
-        las.blue = rgb[:, 2]
+    if colors is not None and len(colors) == len(points_enu):
+        rgb16 = (np.clip(colors, 0.0, 1.0) * 65535.0 + 0.5).astype(np.uint16)
+        las.red   = rgb16[:, 0]
+        las.green = rgb16[:, 1]
+        las.blue  = rgb16[:, 2]
 
-    # Write to file
-    las.write(str(SAVE / f"lidar_{frame:04d}.las"))
-    print(f"Saved: lidar_{frame:04d}.las")
+    out_path = RUN_DIR / f"lidar_{frame_idx:04d}.las"
+    las.write(str(out_path))
+    print(f"[INFO] Saved {out_path.name}  ({len(points_enu):,} pts)")
 
-def log_lidar(frame):
+
+def log_lidar(frame_idx: int) -> None:
     """
-    Collect and save LiDAR data (both .npy and .las)
+    Collect and save LiDAR data as LAS for this frame.
+    Converts AirSim NED -> ENU before writing.
     """
-    lidar_data = c.getLidarData(vehicle_name="Drone1", lidar_name="Lidar1")
-    
-    if lidar_data.point_cloud:
-        # Convert point cloud to numpy array
-        points = np.array(lidar_data.point_cloud, dtype=np.float32).reshape(-1, 3)
+    lidar_data = c.getLidarData(vehicle_name=VEHICLE_NAME, lidar_name=LIDAR_NAME)
+    if not lidar_data.point_cloud:
+        print(f"[WARN] Frame {frame_idx:04d}: empty point cloud")
+        return
 
-        # Optional: colorize points by height (Z-value)
-        colors = None
-        if points.shape[0] > 0:
-            colors = (points[:, 2] - points[:, 2].min()) / (points[:, 2].max() - points[:, 2].min())
-            colors = np.column_stack((colors, 0.5 * np.ones_like(colors), 1 - colors))  # R -> B color map
+    # AirSim gives points in NED: X=N, Y=E, Z=Down
+    pts_ned = np.array(lidar_data.point_cloud, dtype=np.float32).reshape(-1, 3)
 
-        # Save as .npy
-        np.save(SAVE / f"lidar_{frame:04d}.npy", points)
-        
-        # Save as .las (LiDAR point cloud in LAS format)
-        create_las(frame, points, colors)
+    # Convert NED -> ENU (X_enu=E, Y_enu=N, Z_enu=Up)
+    # AirSim: [X_ned, Y_ned, Z_ned] = [N, E, Down]
+    # ENU:    [X_enu, Y_enu, Z_enu] = [E, N, Up]
+    points_enu = np.column_stack((
+        pts_ned[:, 1],        # X_enu (East)  = Y_ned
+        pts_ned[:, 0],        # Y_enu (North) = X_ned
+        -pts_ned[:, 2],       # Z_enu (Up)    = -Z_ned
+    ))
 
-print("Taking off...")
-c.takeoffAsync().join()
-c.moveToZAsync(-5, 2).join()   # hover about 5 m above ground
+    # Optional: colorize by height (using ENU Z for intuitiveness)
+    colors = None
+    if points_enu.shape[0] > 0:
+        z = points_enu[:, 2]
+        zmin, zmax = float(z.min()), float(z.max())
+        denom = max(zmax - zmin, 1e-6)
+        norm = (z - zmin) / denom
+        colors = np.column_stack((norm, 0.5 * np.ones_like(norm), 1.0 - norm))
+
+    create_las(frame_idx, points_enu, colors)
 
 
-# simple square in world frame (meters)
-wps = [(10,0,-5), (10,10,-5), (0,10,-5), (0,0,-5)]
+print("[INFO] Taking off...")
+c.takeoffAsync(vehicle_name=VEHICLE_NAME).join()
+c.moveToZAsync(HOVER_ALT, SPEED, vehicle_name=VEHICLE_NAME).join()
+
+# Simple square in world frame (AirSim NED frame)
+wps = [
+    (10,  0, HOVER_ALT),
+    (10, 10, HOVER_ALT),
+    ( 0, 10, HOVER_ALT),
+    ( 0,  0, HOVER_ALT),
+]
 idx = 0
 
-# def log_lidar(frame):
-#     lidar = c.getLidarData(vehicle_name="Drone1", lidar_name="Lidar1")
-#     if lidar.point_cloud:
-#         pts = np.array(lidar.point_cloud, dtype=np.float32).reshape(-1,3)
-#         np.save(SAVE / f"lidar_{frame:04d}.npy", pts)
-
-for step in range(40):
+for step in range(NUM_STEPS):
     if step % 10 == 0:
-        x,y,z = wps[idx]; idx = (idx+1) % len(wps)
-        c.moveToPositionAsync(x,y,z, 3)
+        x, y, z = wps[idx]
+        idx = (idx + 1) % len(wps)
+        c.moveToPositionAsync(x, y, z, SPEED, vehicle_name=VEHICLE_NAME)
     log_lidar(step)
-    time.sleep(1)
+    time.sleep(LOG_INTERVAL)
 
-c.landAsync().join()
-c.armDisarm(False); c.enableApiControl(False)
-print(f"Done. LiDAR frames saved to {SAVE}")
+c.landAsync(vehicle_name=VEHICLE_NAME).join()
+c.armDisarm(False, VEHICLE_NAME)
+c.enableApiControl(False, VEHICLE_NAME)
+print(f"[DONE] LiDAR frames saved under {RUN_DIR}")
