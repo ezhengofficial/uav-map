@@ -11,15 +11,15 @@ class SetupPath:
     '''
     A bunch of methods just to get path of files and stuff. 
     '''
-    @staticmethod
-    def getLidarDataPath():
-        '''
-        returns path to Lidar data    
-        '''
-        cur_path = SetupPath.getParentDir()
-        lidar_dir = os.path.join(cur_path, "data")
-        os.makedirs(lidar_dir, exist_ok=True)
-        return lidar_dir
+    # @staticmethod
+    # def getLidarDataPath():
+    #     '''
+    #     returns path to Lidar data    
+    #     '''
+    #     cur_path = SetupPath.getParentDir()
+    #     lidar_dir = os.path.join(cur_path, "data")
+    #     os.makedirs(lidar_dir, exist_ok=True)
+    #     return lidar_dir
 
     @staticmethod
     def getDirLevels(path):
