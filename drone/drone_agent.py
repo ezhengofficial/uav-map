@@ -1,7 +1,8 @@
 import os
 import numpy as np
 import laspy
-from setup_path import SetupPath
+
+from ..config import DATA_DIR
 
 class DroneAgent:
     '''
@@ -12,8 +13,9 @@ class DroneAgent:
         self.client = client
         self.name = drone_name
         self.lidar_name = lidar_name
-        self.lidar_data_dir = os.path.join( SetupPath.getLidarDataPath(), self.name)
+        self.lidar_data_dir = os.path.join(DATA_DIR, self.name)
         os.makedirs(self.lidar_data_dir, exist_ok=True)
+        
 
     def takeoff(self, altitude=5):
         self.client.enableApiControl(True, self.name)

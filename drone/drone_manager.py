@@ -1,16 +1,19 @@
 import json
 import os
-import keyboard
 import airsim
 
 import time
 import threading
 
 from drone_agent import DroneAgent
-from setup_path import SetupPath
 
+from ..config import DATA_DIR
 
 class DroneManager:
+    '''
+    Class to Manage all the drones.
+    TODO - Incorporate automonous drone management 
+    '''
     def __init__(self, settings_file=None):
         self.client = airsim.MultirotorClient()
         self.client.confirmConnection()
@@ -40,10 +43,10 @@ class DroneManager:
             for sensor_name, sensor_cfg in sensors.items():
                 if sensor_cfg.get("SensorType") == 6:  # 6 = LiDAR in AirSim
                     lidar_name = sensor_name
-                    break
+                    # break
 
             if lidar_name is None:
-                print(f"[WARN] No LiDAR found for {name}, skipping lidar assignment.")
+                print(f"[WARNING] No LiDAR found for {name}, skipping lidar assignment.")
                 lidar_name = "Lidar1"  # fallback if needed
 
             # Pass lidar_name into DroneAgent
