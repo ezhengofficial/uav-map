@@ -1,8 +1,7 @@
 import os
 import numpy as np
 import laspy
-
-from ..config import DATA_DIR
+from files_path import DATA_DIR
 
 class DroneAgent:
     '''

@@ -1,7 +1,10 @@
 from flask import Flask, send_file
 import merge
+from files_path import DATA_DIR
+
 
 app = Flask(__name__, static_folder="static")
+MERGED_LAS_FILE = DATA_DIR / "final/merged.las"
 FINAL_FILE = "data/merged.las" # TODO Update this
 
 @app.route("/")
@@ -21,7 +24,7 @@ def wasm_data():
 def merged_las():
     # TODO - Merge files beforehand
     merge.merge_data()
-    response = send_file("data/merged.las")
+    response = send_file(MERGED_LAS_FILE)
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
     return response

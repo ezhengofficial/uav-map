@@ -7,7 +7,6 @@ import threading
 
 from drone_agent import DroneAgent
 
-from ..config import DATA_DIR
 
 class DroneManager:
     '''

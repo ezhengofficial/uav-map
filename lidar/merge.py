@@ -3,7 +3,7 @@ from pathlib import Path
 import laspy
 import numpy as np
 import sys
-from ..config import DATA_DIR
+from files_path import DATA_DIR , MERGED_LAS_FILE
 
 
 # def find_logs_root(script_path: Path, explicit: Path | None) -> Path:
@@ -78,7 +78,7 @@ def _merge_all_drones_to_final(data_root: Path, final_output: Path):
     Find all 'Drone <number>' directories under data_root,
     merge their LAS files into one global LAS file.
     """
-    drone_dirs = sorted([p for p in data_root.glob("Drone *") if p.is_dir()])
+    drone_dirs = sorted([p for p in data_root.glob("Drone*") if p.is_dir()])
     if not drone_dirs:
         print(f"[WARNING] No Drone directories found in {data_root}")
         return 
@@ -91,7 +91,7 @@ def merge_data(data_root= None, output_file=None):
     if data_root is None:
         data_root = DATA_DIR
     if output_file is None:
-        output_file = DATA_DIR / "final/merged.las"
+        output_file = MERGED_LAS_FILE
     _merge_all_drones_to_final(data_root, output_file)
 
 
