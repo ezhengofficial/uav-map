@@ -7,6 +7,10 @@ import threading
 
 from drone_agent import DroneAgent
 
+<<<<<<< HEAD
+=======
+from ..config import DATA_DIR
+>>>>>>> origin/fix_lidar
 
 class DroneManager:
     '''

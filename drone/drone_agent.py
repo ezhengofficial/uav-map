@@ -1,7 +1,12 @@
 import os
 import numpy as np
 import laspy
+<<<<<<< HEAD
 from files_path import DATA_DIR
+=======
+
+from ..config import DATA_DIR
+>>>>>>> origin/fix_lidar
 
 class DroneAgent:
     '''
