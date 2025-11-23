@@ -1,3 +1,7 @@
+"""
+Coverage grid building with wall detection.
+Extracted from explore_single_loop.py for modularity.
+"""
 import numpy as np
 from typing import Tuple
 from dataclasses import dataclass

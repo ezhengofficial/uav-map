@@ -1,115 +1,118 @@
-import argparse
-from pathlib import Path
 import laspy
 import numpy as np
-import sys
-from files_path import DATA_DIR , MERGED_LAS_FILE
+import json
+from pathlib import Path
+from files_path import DATA_DIR, MERGED_LAS_FILE, SETTINGS_JSON_FILE, TRACKER_FILE
 
+TRACKER_FILE = DATA_DIR / "final/merge_tracker.json"
 
-# def find_logs_root(script_path: Path, explicit: Path | None) -> Path:
-#     base = script_path.parents[1] / "data" / "logs"
-#     if explicit:
-#         return explicit
-#     # if timestamped subfolders exist, pick newest
-#     subs = [p for p in base.glob("*") if p.is_dir()]
-#     if not subs:
-#         return base
-#     return max(subs, key=lambda p: p.stat().st_mtime)
+# --- Tracker helpers ---
+def _load_tracker() -> dict:
+    if TRACKER_FILE.exists():
+        with open(TRACKER_FILE, "r") as f:
+            return json.load(f)
+    return {}
 
-def _merge_las_files(input_dirs: list[Path], output_file: Path):
-    '''
-    Merge all .las files from a list of directories into one LAS file.
-    '''
-    files = []
+def _save_tracker(tracker: dict):
+    TRACKER_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(TRACKER_FILE, "w") as f:
+        json.dump(tracker, f)
+
+# --- Incremental merge ---
+def _merge_las_files_incremental(input_dirs: list[Path], output_file: Path):
+    """
+    Incrementally merge LAS files from multiple drone directories.
+    Assumes each LAS is already aligned in WORLD ENU coordinates.
+    """
+    tracker = _load_tracker()
+    new_points, new_colors = [], []
+
     for d in input_dirs:
-        files.extend(sorted(d.glob("*.las")))
+        drone_name = d.name
+        last_idx = tracker.get(drone_name, -1)
 
-    # files = sorted(input_dir.glob("*.las"))
-    if not files:
-        print(f"[WARNING] No LAS files found in {input_dirs}")
+        # Only consider files with index > last_idx
+        new_files = []
+        for f in sorted(d.glob("lidar_*.las")):
+            try:
+                idx = int(f.stem.split("_")[1])
+            except Exception:
+                continue
+            if idx > last_idx:
+                new_files.append((idx, f))
+
+        if not new_files:
+            continue
+
+        for idx, f in new_files:
+            if f.stat().st_size == 0:
+                print(f"[WARN] Skipping empty LAS file: {f}")
+                continue
+            try:
+                las = laspy.read(f)
+            except Exception as e:
+                print(f"[ERROR] Failed to read {f}: {e}")
+                continue
+
+            pts = np.vstack((las.x, las.y, las.z)).T
+            new_points.append(pts)
+
+            if hasattr(las, "red"):
+                new_colors.append(np.vstack((las.red, las.green, las.blue)).T)
+
+            tracker[drone_name] = idx  # update tracker
+
+    if not new_points:
+        print("[INFO] No new LAS files to merge")
         return
-        # sys.exit(1)
 
-    # print(f"[INFO] Found {len(files)} LAS files in {input_dir}")
+    new_points = np.vstack(new_points)
+    new_colors = np.vstack(new_colors) if new_colors else None
 
-    merged_points = []
-    merged_colors = []
+    # Append to existing merged file if it exists
+    if output_file.exists():
+        las_out = laspy.read(output_file)
+        old_pts = np.vstack((las_out.x, las_out.y, las_out.z)).T
+        merged_points = np.vstack((old_pts, new_points))
 
-    first_header = None
-    for f in files:
-        las = laspy.read(f)
-        # if first_header is None:
-        #     first_header = las.header
-        pts = np.vstack((las.x, las.y, las.z)).T
-        merged_points.append(pts)
-        if hasattr(las, "red"):
-            merged_colors.append(np.vstack((las.red, las.green, las.blue)).T)
-        # print(f"[INFO] Loaded {f.name}: {len(pts):,} points")
-
-    merged_points = np.vstack(merged_points)
-    merged_colors = np.vstack(merged_colors) if merged_colors else None
+        if new_colors is not None and hasattr(las_out, "red"):
+            old_colors = np.vstack((las_out.red, las_out.green, las_out.blue)).T
+            merged_colors = np.vstack((old_colors, new_colors))
+        else:
+            merged_colors = new_colors
+    else:
+        merged_points = new_points
+        merged_colors = new_colors
 
     # Create merged LAS header
     header = laspy.LasHeader(point_format=3, version="1.2")
     header.scales = np.array([0.01, 0.01, 0.01])
-    header.offsets = np.array([
-        float(np.min(merged_points[:, 0])),
-        float(np.min(merged_points[:, 1])),
-        float(np.min(merged_points[:, 2])),
-    ])
+    header.offsets = np.min(merged_points, axis=0)
 
     las_out = laspy.LasData(header)
-    las_out.x = merged_points[:, 0]
-    las_out.y = merged_points[:, 1]
-    las_out.z = merged_points[:, 2]
+    las_out.x, las_out.y, las_out.z = merged_points[:,0], merged_points[:,1], merged_points[:,2]
 
     if merged_colors is not None:
-        las_out.red   = merged_colors[:, 0]
-        las_out.green = merged_colors[:, 1]
-        las_out.blue  = merged_colors[:, 2]
+        las_out.red, las_out.green, las_out.blue = merged_colors[:,0], merged_colors[:,1], merged_colors[:,2]
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
     las_out.write(str(output_file))
-    print(f"[OK] Wrote merged LAS: {output_file}")
+    _save_tracker(tracker)
+
+    print(f"[OK] Incrementally merged into {output_file}")
     print(f"     Total points: {len(merged_points):,}")
 
 def _merge_all_drones_to_final(data_root: Path, final_output: Path):
-    """
-    Find all 'Drone <number>' directories under data_root,
-    merge their LAS files into one global LAS file.
-    """
     drone_dirs = sorted([p for p in data_root.glob("Drone*") if p.is_dir()])
     if not drone_dirs:
         print(f"[WARNING] No Drone directories found in {data_root}")
-        return 
+        return
+    print(f"[INFO] Incrementally merging LAS files from {len(drone_dirs)} Drone directories")
+    _merge_las_files_incremental(drone_dirs, final_output)
 
-    print(f"[INFO] Merging LAS files from {len(drone_dirs)} Drone directories into {final_output}")
-    _merge_las_files(drone_dirs, final_output)
-
-
-def merge_data(data_root= None, output_file=None):
+def merge_data(data_root=None, output_file=None):
     if data_root is None:
         data_root = DATA_DIR
     if output_file is None:
         output_file = MERGED_LAS_FILE
     _merge_all_drones_to_final(data_root, output_file)
-
-
-# def main():
-#     parser = argparse.ArgumentParser(description="Merge multiple LAS files into a single LAS/LAZ file.")
-#     parser.add_argument("--logs", type=str, default=None, help="Path to folder with LAS frames (default: latest in data/logs/).")
-#     parser.add_argument("--outfile", type=str, default=None, help="Output .las or .laz file path.")
-#     parser.add_argument("--compress", action="store_true", help="Write compressed LAZ output (requires laspy[laszip] or LAZ support).")
-#     args = parser.parse_args()
-
-#     script_path = Path(__file__).resolve()
-#     input_dir = find_logs_root(script_path, Path(args.logs) if args.logs else None)
-
-#     outname = args.outfile or (Path(__file__).resolve().parents[1] / "data" / "merged.las")
-#     if args.compress and not str(outname).lower().endswith(".laz"):
-#         outname = outname.with_suffix(".laz")
-
-#     merge_las_files(input_dir, outname)
-
-# if __name__ == "__main__":
-#     main()

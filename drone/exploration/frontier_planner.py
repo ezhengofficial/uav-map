@@ -1,3 +1,7 @@
+"""
+Frontier detection and A* path planning.
+Extracted from explore_single_loop.py for modularity.
+"""
 import numpy as np
 from heapq import heappush, heappop
 from typing import Optional, List, Tuple, Set
@@ -18,12 +22,12 @@ class FrontierPlanner:
     """Plans paths to unexplored frontier regions."""
     
     def __init__(self,
-                 min_frontier_dist: float = 20.0,
-                 min_frontier_neighbors: int = 5,
-                 frontier_dilate_iters: int = 0,
-                 wall_dilate_iters: int = 2,
+                 min_frontier_dist: float = 3.0,  # Reduced - was too large
+                 min_frontier_neighbors: int = 3,  # Reduced for sensitivity
+                 frontier_dilate_iters: int = 1,   # Slight dilation
+                 wall_dilate_iters: int = 1,       # Reduced - was blocking paths
                  obstacle_dilate_iters: int = 1,
-                 max_candidates: int = 100):
+                 max_candidates: int = 200):       # Check more candidates
         self.min_frontier_dist = min_frontier_dist
         self.min_frontier_neighbors = min_frontier_neighbors
         self.frontier_dilate_iters = frontier_dilate_iters

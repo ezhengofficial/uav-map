@@ -15,7 +15,7 @@ Instructions to help set up the project locally and run it
 ### Prerequisites
 
 * See [Unreal Engine](https://www.unrealengine.com/en-US/download)
-
+* Download [Blocks](https://github.com/microsoft/AirSim/releases/download/v1.8.0-linux/Blocks.zip) 
 
 ### Installations
 
