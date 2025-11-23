@@ -1,11 +1,11 @@
-from flask import Flask, send_file
+from flask import Flask, send_file, jsonify, request
 import merge
 from files_path import MERGED_LAS_FILE
 
 
 app = Flask(__name__, static_folder="static")
-# MERGED_LAS_FILE = DATA_DIR / "final/merged.las"
-# FINAL_FILE = "data/merged.las" # TODO Update this
+
+CURRENT_VIEW_OPTIONS = {}
 
 @app.route("/")
 def index():
@@ -28,6 +28,14 @@ def merged_las():
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
     return response
+
+@app.route("/view-options", methods=["GET", "POST"])
+def view_options():
+    global CURRENT_VIEW_OPTIONS
+    if request.method == "POST":
+        CURRENT_VIEW_OPTIONS = request.json or {}
+        return jsonify({"status": "saved"})
+    return jsonify(CURRENT_VIEW_OPTIONS)
 
 if __name__ == "__main__":
     app.run(port=8000)
