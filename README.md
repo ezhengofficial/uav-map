@@ -7,7 +7,11 @@ LiDAR point cloud data in real-time. The system merge these data streams into on
 
 ### Problem Statment
 
-Search and Rescue missions often take place in hazardous and unpredictable environments with limited time and resource. UAVs offer additional mobility by reaching difficult areas more quickly and gathering surrounding data. This project aims to simulate multiple drones mapping an environment and providing real-time data for users. This project focuses specifcally on using LiDAR to map surrounding areas
+Search and Rescue missions often take place in hazardous and unpredictable environments with limited time and resources. This project leverages UAVS to help solve some of the hardships associated with search and rescue missions. 
+1. UAVs offer additional mobility by reaching difficult areas quickly, which is crucial in time-sensitive situations.
+2. UAVs aren't limited resources, as swarms of UAVs can be set up for greater mobility and coverage area.
+3. UAVs can provide real-time data for clients and can be equipped with different sensors.
+This project aims to simulate multiple drones mapping an environment and providing real-time data for users. This project focuses specifically on using LiDAR to map surrounding areas.
 
 ### Solution
 
