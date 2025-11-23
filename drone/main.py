@@ -1,31 +1,41 @@
+"""
+Main entry point with separate logging per drone.
+"""
 import sys
 import time
 import argparse
+from pathlib import Path
+from datetime import datetime
 from drone_manager import DroneManager
 from exploration.explorer import ExplorationConfig
+from files_path import DATA_DIR
+
+
+def setup_logging_dirs():
+    """Create debug directory for this run."""
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    debug_dir = Path(DATA_DIR) / "debug" / run_id
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    return debug_dir
 
 
 def run_interactive(manager: DroneManager):
-    """
-    Interactive keyboard control mode.
-    Uses simple input() for cross-platform compatibility.
-    """
+    """Interactive mode."""
     print("\n" + "="*50)
-    print("Drone Control Menu")
+    print("Drone Control")
     print("="*50)
-    print("  t - Takeoff all")
-    print("  l - Land all")
-    print("  s - Stop/hover all")
-    print("  w - Start LiDAR logging")
-    print("  e - Stop LiDAR logging")
-    print("  x - Start parallel exploration (all drones)")
-    print("  p - Show exploration status")
+    print("  t - Takeoff")
+    print("  l - Land")
+    print("  s - Stop/hover")
+    print("  c - Calibrate GPS")
+    print("  x - Start exploration")
+    print("  p - Status")
     print("  q - Quit")
     print("="*50 + "\n")
     
     try:
         while True:
-            cmd = input("Enter command: ").strip().lower()
+            cmd = input("> ").strip().lower()
             
             if cmd == 't':
                 manager.takeoff_all()
@@ -33,26 +43,16 @@ def run_interactive(manager: DroneManager):
                 manager.land_all()
             elif cmd == 's':
                 manager.stop_all()
-            elif cmd == 'w':
-                manager.start_lidar_logging(interval=0.5)
-            elif cmd == 'e':
-                manager.stop_lidar_logging()
+            elif cmd == 'c':
+                manager.calibrate_gps_origin()
             elif cmd == 'x':
-                print("Starting parallel exploration...")
-                print("Available strategies: vertical, horizontal, grid")
-                strategy = input("Partition strategy [vertical]: ").strip() or "vertical"
+                strategy = input("Strategy [quadrant]: ").strip() or "quadrant"
                 manager.start_exploration(partition_strategy=strategy)
             elif cmd == 'p':
-                status = manager.get_exploration_status()
-                print("Exploration status:")
-                for name, active in status.items():
-                    state = "ACTIVE" if active else "FINISHED"
-                    print(f"  {name}: {state}")
+                for name, active in manager.get_exploration_status().items():
+                    print(f"  {name}: {'ACTIVE' if active else 'DONE'}")
             elif cmd == 'q':
-                print("Exiting...")
                 break
-            else:
-                print(f"Unknown command: {cmd}")
                 
     except KeyboardInterrupt:
         print("\nInterrupted")
@@ -61,86 +61,65 @@ def run_interactive(manager: DroneManager):
 
 
 def run_exploration(manager: DroneManager, config: ExplorationConfig, 
-                    strategy: str = "vertical"):
-    """Run autonomous parallel exploration directly."""
-    print("[Main] Starting parallel autonomous exploration...")
-    print(f"[Main] Drones: {list(manager.drones.keys())}")
-    print(f"[Main] Partition strategy: {strategy}")
+                    strategy: str = "quadrant"):
+    """Run parallel exploration."""
+    print(f"[Main] Starting exploration with {len(manager.drones)} drones")
+    print(f"[Main] Strategy: {strategy}")
+    print(f"[Main] Logs will be saved to each drone's debug folder")
     
     try:
         manager.start_exploration(config=config, partition_strategy=strategy)
         
-        # Monitor progress
         while True:
             time.sleep(5.0)
             status = manager.get_exploration_status()
-            active = [name for name, running in status.items() if running]
+            active = [n for n, running in status.items() if running]
             
             if not active:
-                print("[Main] All drones finished exploration")
+                print("[Main] All drones finished")
                 break
             
-            print(f"[Main] Active explorers: {active}")
+            print(f"[Main] Active: {active}")
             
     except KeyboardInterrupt:
-        print("\n[Main] Interrupted - shutting down...")
+        print("\n[Main] Interrupted")
     finally:
         manager.shutdown()
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Multi-drone parallel exploration system",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Interactive mode (default)
-  python main.py
-  
-  # Direct exploration with vertical partitioning
-  python main.py --mode explore --strategy vertical
-  
-  # Grid partitioning with custom bounds
-  python main.py --mode explore --strategy grid --bounds -100 100 -100 100
-        """
-    )
+    parser = argparse.ArgumentParser(description="Multi-drone exploration")
     parser.add_argument("--mode", choices=["interactive", "explore"], 
-                        default="interactive",
-                        help="Run mode: interactive menu or auto-explore")
-    parser.add_argument("--settings", type=str, default=None,
-                        help="Path to AirSim settings.json")
-    parser.add_argument("--altitude", type=float, default=5.0,
-                        help="Flight altitude in meters (default: 5.0)")
-    parser.add_argument("--coverage", type=float, default=0.85,
-                        help="Target coverage ratio (default: 0.85)")
-    parser.add_argument("--max-iters", type=int, default=100,
-                        help="Maximum exploration iterations (default: 100)")
-    parser.add_argument("--strategy", choices=["vertical", "horizontal", "grid"],
-                        default="vertical",
-                        help="Map partitioning strategy (default: vertical)")
+                        default="interactive")
+    parser.add_argument("--settings", type=str, default=None)
+    parser.add_argument("--altitude", type=float, default=5.0)
+    parser.add_argument("--coverage", type=float, default=0.85)
+    parser.add_argument("--max-iters", type=int, default=100)
+    parser.add_argument("--strategy", choices=["vertical", "horizontal", "grid", "quadrant"],
+                        default="quadrant")
     parser.add_argument("--bounds", type=float, nargs=4, 
                         metavar=("X_MIN", "X_MAX", "Y_MIN", "Y_MAX"),
-                        default=[-150, 150, -150, 150],
-                        help="World bounds in NED (default: -150 150 -150 150)")
+                        default=[-100, 100, -100, 100],
+                        help="World bounds in ENU meters")
     args = parser.parse_args()
     
-    # Initialize manager
+    # Initialize
     try:
         manager = DroneManager(settings_file=args.settings)
-    except (FileNotFoundError, ValueError) as e:
+    except Exception as e:
         print(f"[ERROR] {e}")
         sys.exit(1)
     
-    # Set world bounds
-    manager.set_world_bounds(*args.bounds)
+    # Set world bounds in ENU
+    manager.set_world_bounds_enu(*args.bounds)
     
-    # Build config
+    # Config
     config = ExplorationConfig()
     config.altitude = args.altitude
     config.coverage_target = args.coverage
     config.max_iterations = args.max_iters
+    config.log_to_file = True  # Enable file logging
     
-    # Run selected mode
     if args.mode == "interactive":
         run_interactive(manager)
     else:

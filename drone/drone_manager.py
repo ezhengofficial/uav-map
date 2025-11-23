@@ -1,10 +1,11 @@
 """
-DroneManager with GPS calibration for world alignment and ENU partitioning.
+DroneManager with CORRECTED GPS calibration and LiDAR sensor configuration parsing.
 """
 import json
 import os
 import time
 import threading
+import math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import airsim
@@ -40,12 +41,15 @@ class DroneManager:
         
         # World bounds in ENU (after GPS calibration)
         self.world_bounds_enu: Tuple[float, float, float, float] = (-150, 150, -150, 150)
+        self.calibrate_gps_origin()
 
     def _parse_settings(self, settings_file: Optional[str]):
+        """
+        FIXED: Properly extract LiDAR sensor position AND orientation from settings.json
+        """
         if settings_file is None:
             candidates = [
                 Path.home() / "Documents" / "AirSim" / "settings.json",
-                Path.home() / ".airsim" / "settings.json",
             ]
             for p in candidates:
                 if p.exists():
@@ -64,12 +68,44 @@ class DroneManager:
         
         for name, cfg in vehicles.items():
             lidar_name = "Lidar1"
+            lidar_offset = (0.0, 0.0, 0.0)
+            lidar_rotation = (0.0, 0.0, 0.0)  # Roll, Pitch, Yaw in degrees
+
             for sname, scfg in cfg.get("Sensors", {}).items():
-                if scfg.get("SensorType") == 6:
+                if scfg.get("SensorType") == 6:  # 6 = Lidar
                     lidar_name = sname
+                    
+                    # Extract position offset (X, Y, Z in NED frame)
+                    lx = scfg.get("X", 0.0)
+                    ly = scfg.get("Y", 0.0)
+                    lz = scfg.get("Z", 0.0)
+                    lidar_offset = (lx, ly, lz)
+                    
+                    # Extract orientation (Roll, Pitch, Yaw in DEGREES)
+                    roll_deg = scfg.get("Roll", 0.0)
+                    pitch_deg = scfg.get("Pitch", 0.0)
+                    yaw_deg = scfg.get("Yaw", 0.0)
+                    
+                    # Convert to radians for rotation matrix
+                    lidar_rotation = (
+                        math.radians(roll_deg),
+                        math.radians(pitch_deg),
+                        math.radians(yaw_deg)
+                    )
+                    
+                    print(f"[Manager] {name} LiDAR '{sname}':")
+                    print(f"          Position: {lidar_offset} (NED)")
+                    print(f"          Rotation: R={roll_deg}° P={pitch_deg}° Y={yaw_deg}°")
                     break
             
-            self.drones[name] = DroneAgent(name, lidar_name, shared_client=None)
+            # Create drone agent with proper sensor configuration
+            self.drones[name] = DroneAgent(
+                drone_name=name, 
+                lidar_name=lidar_name, 
+                shared_client=None,
+                lidar_offset_ned=lidar_offset,
+                lidar_rotation_rpy=lidar_rotation
+            )
             print(f"[Manager] Registered: {name}")
         
         print(f"[Manager] {len(self.drones)} drones total")
@@ -85,6 +121,9 @@ class DroneManager:
         drone = self.drones[reference_drone]
         drone.connect()
         
+        # Wait a moment for GPS to stabilize
+        time.sleep(0.5)
+        
         self._gps_origin = drone.calibrate_from_current_gps()
         
         # Share origin with all drones
@@ -92,6 +131,7 @@ class DroneManager:
             d.set_gps_origin(self._gps_origin)
         
         print(f"[Manager] GPS origin set from {reference_drone}")
+        print(f"[Manager] All drones now share common world frame")
         return self._gps_origin
 
     def set_world_bounds_enu(self, x_min: float, x_max: float, 
@@ -222,7 +262,9 @@ class DroneManager:
         
         # Calibrate GPS if not done
         if self._gps_origin is None:
+            print("[Manager] Calibrating GPS origin...")
             self.calibrate_gps_origin(targets[0])
+            time.sleep(1.0)  # Allow calibration to propagate
         
         # Partition in ENU
         regions = self.partition_map_enu(len(targets), partition_strategy)
@@ -235,7 +277,7 @@ class DroneManager:
             
             drone = self.drones[name]
             explorer = Explorer(drone, config)
-            explorer.set_region_enu(*region)  # Set ENU region directly
+            explorer.set_region_enu(*region)
             self._explorers[name] = explorer
             
             thread = threading.Thread(target=explorer.run, daemon=True, name=f"explore-{name}")

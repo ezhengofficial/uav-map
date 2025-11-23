@@ -1,6 +1,8 @@
 """
-Enhanced DroneAgent with GPS-based world alignment.
+Enhanced DroneAgent with COMPLETELY FIXED GPS-based world alignment.
 All drones save points in a shared world frame using GPS calibration.
+
+COMPLETE FIX: Proper GPS-to-world coordinate transformation
 """
 import os
 import time
@@ -11,6 +13,7 @@ import airsim
 from pathlib import Path
 from typing import Optional, Tuple
 from files_path import DATA_DIR
+from scipy.spatial.transform import Rotation as R
 
 # WGS84 Earth radius
 R_EARTH = 6378137.0
@@ -22,7 +25,9 @@ class DroneAgent:
     Uses GPS-based alignment so all drones share the same world frame.
     """
     def __init__(self, drone_name: str, lidar_name: str = "Lidar1",
-                 shared_client: Optional[airsim.MultirotorClient] = None):
+                 shared_client: Optional[airsim.MultirotorClient] = None,
+                 lidar_offset_ned=(0.0, 0.0, -0.15),
+                 lidar_rotation_rpy=(0.0, 0.0, 0.0)):
         self.name = drone_name
         self.lidar_name = lidar_name
         
@@ -38,11 +43,21 @@ class DroneAgent:
         self.floor_z_enu: Optional[float] = None
         
         # GPS-based world alignment
-        self._gps_origin: Optional[airsim.GeoPoint] = None  # Shared origin
+        self._gps_origin: Optional[airsim.GeoPoint] = None
         self._calibrated = False
         
         # Assigned region (NED)
         self.assigned_region: Optional[Tuple[float, float, float, float]] = None
+        
+        # LiDAR sensor mounting (NED frame relative to drone body)
+        self.lidar_offset_ned = np.array(lidar_offset_ned, dtype=np.float32)
+        self.lidar_rotation_rpy = np.array(lidar_rotation_rpy, dtype=np.float32)
+        
+        # Pre-compute LiDAR rotation matrix (if sensor is rotated)
+        if np.any(self.lidar_rotation_rpy != 0):
+            self.lidar_rotation_matrix = R.from_euler('xyz', self.lidar_rotation_rpy).as_matrix()
+        else:
+            self.lidar_rotation_matrix = np.eye(3)
 
     def connect(self):
         """Establish dedicated AirSim connection."""
@@ -64,6 +79,7 @@ class DroneAgent:
         """Set shared GPS origin for world alignment."""
         self._gps_origin = origin
         self._calibrated = True
+        print(f"[{self.name}] GPS origin set: lat={origin.latitude:.8f}, lon={origin.longitude:.8f}, alt={origin.altitude:.2f}")
 
     def calibrate_from_current_gps(self) -> airsim.GeoPoint:
         """Use this drone's current GPS as the origin."""
@@ -71,21 +87,33 @@ class DroneAgent:
         state = self.client.getMultirotorState(vehicle_name=self.name)
         self._gps_origin = state.gps_location
         self._calibrated = True
-        print(f"[{self.name}] GPS origin: lat={self._gps_origin.latitude:.8f}, "
+        print(f"[{self.name}] Set as GPS origin: lat={self._gps_origin.latitude:.8f}, "
               f"lon={self._gps_origin.longitude:.8f}, alt={self._gps_origin.altitude:.2f}")
         return self._gps_origin
 
     def _gps_to_enu(self, gps: airsim.GeoPoint) -> np.ndarray:
-        """Convert GPS to ENU relative to origin."""
+        """
+        Convert GPS to ENU relative to origin.
+        Uses flat-earth approximation (valid for < 10km distances).
+        """
         if self._gps_origin is None:
             return np.zeros(3, dtype=np.float32)
         
-        d_lat = math.radians(gps.latitude - self._gps_origin.latitude)
-        d_lon = math.radians(gps.longitude - self._gps_origin.longitude)
+        # Differences in degrees
+        d_lat = gps.latitude - self._gps_origin.latitude
+        d_lon = gps.longitude - self._gps_origin.longitude
+        d_alt = gps.altitude - self._gps_origin.altitude
         
-        x_east = d_lon * math.cos(math.radians(self._gps_origin.latitude)) * R_EARTH
-        y_north = d_lat * R_EARTH
-        z_up = gps.altitude - self._gps_origin.altitude
+        # Convert to radians
+        d_lat_rad = math.radians(d_lat)
+        d_lon_rad = math.radians(d_lon)
+        origin_lat_rad = math.radians(self._gps_origin.latitude)
+        
+        # Flat-earth approximation to meters
+        # East-West distance accounts for latitude
+        x_east = d_lon_rad * math.cos(origin_lat_rad) * R_EARTH
+        y_north = d_lat_rad * R_EARTH
+        z_up = d_alt
         
         return np.array([x_east, y_north, z_up], dtype=np.float32)
 
@@ -93,6 +121,13 @@ class DroneAgent:
         """Get current position in world ENU frame (GPS-aligned)."""
         self._ensure_connected()
         state = self.client.getMultirotorState(vehicle_name=self.name)
+        
+        if not self._calibrated:
+            # Auto-calibrate on first call
+            print(f"[{self.name}] Auto-calibrating GPS origin from current position")
+            self._gps_origin = state.gps_location
+            self._calibrated = True
+        
         return self._gps_to_enu(state.gps_location)
 
     # ==================== Basic Flight ====================
@@ -125,12 +160,17 @@ class DroneAgent:
     
     @staticmethod
     def ned_to_enu_points(pts_ned: np.ndarray) -> np.ndarray:
+        """
+        Convert NED points to ENU.
+        NED: [X_ned, Y_ned, Z_ned] = [North, East, Down]
+        ENU: [X_enu, Y_enu, Z_enu] = [East, North, Up]
+        """
         if pts_ned.size == 0:
             return pts_ned
         return np.column_stack((
-            pts_ned[:, 1],   # X_enu = Y_ned
-            pts_ned[:, 0],   # Y_enu = X_ned
-            -pts_ned[:, 2],  # Z_enu = -Z_ned
+            pts_ned[:, 1],   # X_enu = Y_ned (East)
+            pts_ned[:, 0],   # Y_enu = X_ned (North)
+            -pts_ned[:, 2],  # Z_enu = -Z_ned (Up = -Down)
         ))
 
     @staticmethod
@@ -139,36 +179,79 @@ class DroneAgent:
 
     # ==================== LiDAR Operations ====================
 
-    def get_lidar_world_enu(self) -> Optional[np.ndarray]:
+    def get_lidar_world_enu(self) -> np.ndarray:
         """
-        Capture LiDAR and transform to world ENU frame using GPS.
-        This ensures all drones' point clouds align properly.
+        COMPLETELY FIXED: Transforms LiDAR to GPS-aligned world frame.
+        
+        Strategy:
+        1. Transform LiDAR points to local NED frame (body -> world NED)
+        2. Get GPS positions for both origin and current drone
+        3. Compute offset in meters using GPS differences
+        4. Convert local NED to local ENU
+        5. Add GPS-based offset to get world ENU
         """
-        self._ensure_connected()
-        lidar_data = self.client.getLidarData(
-            vehicle_name=self.name,
-            lidar_name=self.lidar_name
-        )
-        if not lidar_data.point_cloud:
-            return None
         
-        pts_local_ned = np.array(lidar_data.point_cloud, dtype=np.float32).reshape(-1, 3)
-        if pts_local_ned.shape[0] == 0:
+        # STEP 1: Synchronized capture
+        self.client.simPause(True)
+        try:
+            lidar_data = self.client.getLidarData(vehicle_name=self.name, lidar_name=self.lidar_name)
+            state = self.client.getMultirotorState(vehicle_name=self.name)
+        finally:
+            self.client.simPause(False)
+
+        if len(lidar_data.point_cloud) < 3:
             return None
+
+        # STEP 2: Raw LiDAR points (sensor frame)
+        pts_lidar_local = np.array(lidar_data.point_cloud, dtype=np.float32).reshape(-1, 3)
         
-        # Convert local NED to local ENU
+        # STEP 3: Apply sensor rotation (if configured)
+        pts_lidar_rotated = pts_lidar_local @ self.lidar_rotation_matrix.T
+        
+        # STEP 4: Add sensor offset (now in body frame)
+        pts_body_ned = pts_lidar_rotated + self.lidar_offset_ned
+        
+        # STEP 5: Rotate to local world NED using drone orientation
+        q = state.kinematics_estimated.orientation
+        drone_rotation = R.from_quat([q.x_val, q.y_val, q.z_val, q.w_val])
+        pts_local_ned_rotated = drone_rotation.apply(pts_body_ned)
+        
+        # STEP 6: Add drone position in local NED
+        drone_pos_local_ned = np.array([
+            state.kinematics_estimated.position.x_val,
+            state.kinematics_estimated.position.y_val,
+            state.kinematics_estimated.position.z_val
+        ], dtype=np.float32)
+        
+        pts_local_ned = pts_local_ned_rotated + drone_pos_local_ned
+        
+        # STEP 7: Convert local NED to local ENU
         pts_local_enu = self.ned_to_enu_points(pts_local_ned)
         
-        # Get drone's world position and add to points
+        # STEP 8: Add GPS-based world offset
         if self._calibrated and self._gps_origin is not None:
-            world_offset = self.get_world_position_enu()
-            pts_world_enu = pts_local_enu + world_offset
+            # Get drone's GPS-based world position in ENU
+            drone_gps_world_enu = self._gps_to_enu(state.gps_location)
+            
+            # Get drone's local position in ENU
+            drone_local_enu = self.ned_to_enu_points(drone_pos_local_ned.reshape(1, 3)).flatten()
+            
+            # Compute the offset from local to world
+            # world = local + (GPS_world - local_at_current_pos)
+            offset = drone_gps_world_enu - drone_local_enu
+
+            print(f"DEBUGG ... {drone_gps_world_enu}")
+            print(f"DEBUGG ... {drone_local_enu}")
+            print(f"DEBUGG...{offset}")
+
+            # Apply to all points
+            pts_world_enu = pts_local_enu + offset
         else:
-            # Fallback: use local coordinates
+            # No GPS calibration - use local ENU
             pts_world_enu = pts_local_enu
         
         return pts_world_enu
-
+    
     def scan_and_save(self, colorize: bool = True) -> Optional[np.ndarray]:
         """Capture LiDAR in world frame and save."""
         pts_enu = self.get_lidar_world_enu()
@@ -201,7 +284,7 @@ class DroneAgent:
             return
         
         header = laspy.LasHeader(point_format=3, version="1.2")
-        header.scales = np.array([0.01, 0.01, 0.01])
+        header.scales = np.array([0.001, 0.001, 0.001])  # 1mm precision
         header.offsets = np.array([
             float(pts_enu[:, 0].min()),
             float(pts_enu[:, 1].min()),
@@ -214,7 +297,7 @@ class DroneAgent:
         las.z = pts_enu[:, 2]
 
         if colors is not None and len(colors) == len(pts_enu):
-            rgb16 = (np.clip(colors, 0.0, 1.0) * 65535).astype(np.uint16)
+            rgb16 = (np.clip(colors, 0.0, 1.0) * 65535.0).astype(np.uint16)
             las.red = rgb16[:, 0]
             las.green = rgb16[:, 1]
             las.blue = rgb16[:, 2]
