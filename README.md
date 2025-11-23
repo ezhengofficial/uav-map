@@ -7,15 +7,26 @@ LiDAR point cloud data in real-time. The system merge these data streams into on
 
 ### Problem Statment
 
-Search and Rescue missions often take place in hazardous and unpredictable environments with limited time and resource. UAVs offer additional mobility by reaching difficult areas more quickly and gathering surrounding data. This project aims to simulate multiple drones mapping an environment and providing real-time data for users. This project focuses specifcally on using LiDAR to map surrounding areas
+Search and Rescue missions often take place in hazardous and unpredictable environments with limited time and resources. This project leverages UAVS to help solve some of the hardships associated with search and rescue missions. 
+1. UAVs offer additional mobility by reaching difficult areas quickly, which is crucial in time-sensitive situations.
+2. UAVs aren't limited resources, as swarms of UAVs can be set up for greater mobility and coverage area.
+3. UAVs can provide real-time data for clients and can be equipped with different sensors.
+This project aims to simulate multiple drones mapping an environment and providing real-time data for users. This project focuses specifically on using LiDAR to map surrounding areas.
+
+### Solution
+
+<!-- TODO - Figure out what works later-->
+
 
 ## Getting Started
 Instructions to help set up the project locally and run it
+
 
 ### Prerequisites
 
 * See [Unreal Engine](https://www.unrealengine.com/en-US/download)
 * Download [Blocks](https://github.com/microsoft/AirSim/releases/download/v1.8.0-linux/Blocks.zip) 
+    * See [here](https://github.com/microsoft/AirSim/releases/) for more information
 
 ### Installations
 
@@ -31,15 +42,34 @@ Instructions to help set up the project locally and run it
     ```
 
 3. Setup `settings.json`
+    * An example of `settings.json` can be found [here](config/settings.json)
 
-3. Windows Only
-    ```bash
-    tools\setup.bat
+4. Launch AirSim Simulator
+    * `Blocks.exe` for this project
+
+5. Run code to fly drone and collect data
+    ```sh
+    cd scripts
+    python multi_realtime_map.py
     ```
+6. Run code to visualize LiDAR data in a seperate terminal
+    ```sh
+    cd lidar
+    python app.py
+    ```
+
+<!-- TODO - Run the code via batch? -->
+
+## Bugs
+
+* If the code does not connect to the simulator, check that
+    * `settings.json` and the simulator established connection
+    * Restart your device
 
 ## License
 
-See [License](LICENSE)
+See [License](LICENSE) for license information
 
 ## Acknowledgements
 * [LasViewer](https://lasviewer.github.io/)
+* [AirSim](https://microsoft.github.io/AirSim/)
