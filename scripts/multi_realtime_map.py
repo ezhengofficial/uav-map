@@ -7,27 +7,25 @@ from datetime import datetime
 import laspy
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
-from heapq import heappush, heappop  # <<< NEW: for A* priority queue
+from heapq import heappush, heappop
+from collections import deque
 
 # ========================= CONFIG =========================
 
 VEHICLES   = ["Drone1", "Drone2", "Drone3"]
 LIDAR_NAME = "Lidar1"
 
-BASE_ALT   = -10.0    # NED (negative = up)
-SPEED      = 4.0     # m/s
+BASE_ALT   = -7.0    # NED (negative = up)
+SPEED      = 4.0      # m/s
 
 # Scan / update timing
-SCAN_INTERVAL_SEC   = 0.5     # how often we grab LiDAR from each drone
-LAS_SAVE_EVERY_N_FRAMES = 1  # per-drone LAS for debugging/logging
-
-# Periodically save full world LiDAR snapshot (all drones merged)
-WORLD_SAVE_EVERY_N_SCANS = 100  # every N main-loop iterations
+SCAN_INTERVAL_SEC        = 0.5     # how often we grab LiDAR from each drone
+LAS_SAVE_EVERY_N_FRAMES  = 1       # per-drone LAS for debugging/logging
 
 # Global ENU grid (meters) around reference (Drone1 GPS)
-X_MIN_ENU, X_MAX_ENU = -100.0, 100.0
-Y_MIN_ENU, Y_MAX_ENU = -100.0, 100.0
-CELL_SIZE            = 1.0   # m per cell
+X_MIN_ENU, X_MAX_ENU = -120.0, 120.0
+Y_MIN_ENU, Y_MAX_ENU = -120.0, 120.0
+CELL_SIZE            = 0.8   # m per cell
 
 # Visualization
 VIS_UPDATE_PERIOD_SEC = 3.0  # how often to refresh the 2D grid image
@@ -37,40 +35,49 @@ MIN_HIT_COUNT_FOR_OBSTACLE = 10      # min number of points in a cell
 MIN_Z_EXTENT_FOR_OBSTACLE  = 0.3     # min vertical extent (m) to consider real structure
 CLEARANCE_BELOW_DRONE_M    = 1.0     # if top is within this of drone altitude -> obstacle
 
-# Obstacle inflation / safety bubble (in grid cells)
-WALL_DILATE_ITERS     = 0   # grow "hard" obstacles by N cells
-OBSTACLE_DILATE_ITERS = 0   # further inflate for safety (no-fly)
-
 # Approximate drone flight height in ENU (Up)
 DRONE_ALT_ENU_APPROX = abs(BASE_ALT)   # floor ~z=0, flight ~|BASE_ALT|
 
 # Filter out LiDAR returns that hit drone bodies
-DRONE_BODY_RADIUS_M   = 0.5    # horizontal radius around drone center to remove
-DRONE_BODY_Z_MARGIN_M = 0.6    # +/- vertical band around drone altitude to remove
+DRONE_BODY_RADIUS_M   = 0.8    # horizontal radius around drone center to remove
+DRONE_BODY_Z_MARGIN_M = 1.0    # +/- vertical band around drone altitude to remove
 
-# Frontier planning (for a single active drones)
+# Frontier planning (for active drones)
 ACTIVE_PLANNERS          = ["Drone1", "Drone2", "Drone3"]  # which drones are allowed to move
-PLAN_PERIOD_SEC     = 1.0       # how often to attempt a new plan
-MAX_GRID_STEPS_PER_MOVE = 15    # how many grid cells along path per command
-MIN_FRONTIER_DIST_M = 10.0       # don't pick frontiers too close to the drone
-REPLAN_DIST_EPS_M   = 5.0       # only replan if we're close to previous target
+PLAN_PERIOD_SEC          = 1.0       # how often to attempt a new plan
+MAX_GRID_STEPS_PER_MOVE  = 25        # how many grid cells along path per command
+MIN_FRONTIER_DIST_M      = 15.0      # don't pick frontiers too close to the drone
+REPLAN_DIST_EPS_M        = 5.0       # only replan if we're close to previous target
 
 # Filter out tiny frontiers that are just pinholes in known regions
-# Require at least this many unknown cells in a 3x3 neighborhood
 MIN_FRONTIER_UNKNOWN_NEIGHBORS = 5
 
 # Keep different drones from "fighting" over the same frontier cluster
 MIN_INTERDRONE_FRONTIER_SEP_M = 10.0
 
-# Per-drone goal history constraint:
-# A newly chosen frontier goal must not be within this radius (m)
-# of any of the last N goals for that drone.
-GOAL_HISTORY_RADIUS_M = 10.0   # tune: 5–20 m
-GOAL_HISTORY_LEN      = 5      # how many past goals we remember
+# Per-drone goal history constraint
+GOAL_HISTORY_RADIUS_M = 10.0   # frontiers too close to any of last N goals are skipped
+GOAL_HISTORY_LEN      = 5
 
 # Cap how many times we let a drone target the same frontier cell
-# before declaring it "blocked" (likely impossible)
 MAX_GOAL_REPEATS = 2
+
+# Stuck detection (per-drone)
+STUCK_WINDOW            = 10     # number of recent positions to track
+STUCK_MOVED_THRESH_M    = 0.5    # total movement below this → "not moving"
+STUCK_TARGET_DIST_THRESH_M = 10.0  # still far from target → possibly stuck
+
+# Obstacle inflation / safety bubble (in grid cells)
+# Slightly inflate walls to reduce "threading the needle" through narrow gaps
+WALL_DILATE_ITERS     = 1   # grow "hard" obstacles by N cells
+OBSTACLE_DILATE_ITERS = 0   # further inflate for safety (no-fly)
+
+# Escape maneuver when stuck
+ESCAPE_BACK_DIST_M   = 10.0   # how far to move away from the blocked goal
+ESCAPE_SIDE_JITTER_M = 2.0   # sideways jitter to avoid oscillations
+
+# Clear obstacles under drones so they don't block themselves
+OBSTACLE_CLEAR_RADIUS_CELLS = 1     # radius (in cells) to clear around each drone
 
 # WGS84 Earth radius for GPS->ENU
 R_EARTH = 6378137.0
@@ -90,11 +97,6 @@ for name in VEHICLES:
     ddir.mkdir(parents=True, exist_ok=True)
     DRONE_DIRS[name] = ddir
     print(f"[INFO]  - {name} LAS logs -> {ddir}")
-
-# World-snapshot folder (merged clouds)
-WORLD_SNAP_DIR = RUN_DIR / "world_snapshots"
-WORLD_SNAP_DIR.mkdir(parents=True, exist_ok=True)
-print(f"[INFO] World snapshots -> {WORLD_SNAP_DIR}")
 
 # ====================== COORD HELPERS ======================
 
@@ -258,7 +260,6 @@ def create_las_frame(out_dir: Path,
 
     out_path = out_dir / f"lidar_{frame_idx:04d}.las"
     las.write(str(out_path))
-    # print(f"[LAS] Saved {out_path.relative_to(RUN_DIR)}  ({len(points_enu):,} pts)")
 
 
 def liDAR_to_world_enu_for_drone(client: airsim.MultirotorClient,
@@ -269,6 +270,7 @@ def liDAR_to_world_enu_for_drone(client: airsim.MultirotorClient,
     Get LiDAR data for one drone, convert local NED -> local ENU,
     then apply static ENU translation so all drones align in a common world frame.
     Also filters out points that likely hit any drone body.
+    Assumes LiDAR DataFrame is VehicleInertialFrame (already orientation/motion-compensated).
     """
     lidar_data = client.getLidarData(vehicle_name=vehicle_name, lidar_name=LIDAR_NAME)
     if not lidar_data.point_cloud:
@@ -317,7 +319,6 @@ def filter_points_near_drones(points_enu: np.ndarray,
         in_xy = (dx*dx + dy*dy) <= radius_m**2
         in_z  = (dz >= -z_margin_m) & (dz <= z_margin_m)
 
-        # Points hitting that drone
         bad = in_xy & in_z
         keep &= ~bad
 
@@ -340,12 +341,6 @@ def update_obstacle_mask():
     """
     global obstacle_mask
 
-    # Assume you already maintain something like:
-    #   grid_count[y,x] = hit count
-    #   grid_z_min[y,x], grid_z_max[y,x]
-    # If not, adapt this body to your existing structure.
-
-    # Example pattern (reuse your real conditions here):
     has_hits = hit_count >= MIN_HIT_COUNT_FOR_OBSTACLE
     z_extent = np.where(has_hits, z_max_map - z_min_map, 0.0)
 
@@ -355,10 +350,8 @@ def update_obstacle_mask():
     too_tall = z_top >= (DRONE_ALT_ENU_APPROX - CLEARANCE_BELOW_DRONE_M)
     wall_core = has_hits & tall_enough & too_tall
 
-    # --- NEW: dilation to get thicker walls and safety zone ---
+    # Dilation to get thicker walls and safety zone
     wall_mask = dilate_mask(wall_core, WALL_DILATE_ITERS)
-
-    # No-fly zone = inflated obstacles
     inflated = dilate_mask(wall_mask, OBSTACLE_DILATE_ITERS)
 
     obstacle_mask = inflated
@@ -383,26 +376,6 @@ def find_frontiers_from_seen(seen: np.ndarray) -> np.ndarray:
     return frontiers
 
 
-def update_frontier_mask():
-    """Recompute frontier_mask from the current grid_seen and obstacle_mask,
-       filter out tiny frontiers, and ignore blocked goals."""
-    global frontier_mask, grid_seen
-
-    raw_frontiers = find_frontiers_from_seen(grid_seen)
-    raw_frontiers = raw_frontiers & (~obstacle_mask)
-
-    # Filter micro-frontiers and mark them as known
-    frontier_mask, grid_seen = filter_tiny_frontiers(
-        raw_frontiers,
-        grid_seen,
-        MIN_FRONTIER_UNKNOWN_NEIGHBORS
-    )
-
-    # Never treat blocked cells as frontiers
-    frontier_mask &= ~blocked_goals_mask
-
-
-
 def filter_tiny_frontiers(frontier_mask: np.ndarray,
                           seen_grid: np.ndarray,
                           min_unknown_neighbors: int
@@ -420,27 +393,22 @@ def filter_tiny_frontiers(frontier_mask: np.ndarray,
     """
     h, w = seen_grid.shape
 
-    # unknown = True where not seen
     unknown = ~seen_grid
     u = unknown.astype(np.int32)
 
-    # pad for 3x3 neighborhood sum
     p = np.pad(u, pad_width=1, mode="constant", constant_values=0)
 
-    # 3x3 sum
     local_unknown = (
         p[0:h,   0:w]   + p[0:h,   1:w+1]   + p[0:h,   2:w+2] +
         p[1:h+1, 0:w]   + p[1:h+1, 1:w+1]   + p[1:h+1, 2:w+2] +
         p[2:h+2, 0:w]   + p[2:h+2, 1:w+1]   + p[2:h+2, 2:w+2]
     )
 
-    # Frontier cells with enough unknown neighbors
-    keep_mask    = local_unknown >= min_unknown_neighbors
-    kept_front   = frontier_mask & keep_mask
+    keep_mask     = local_unknown >= min_unknown_neighbors
+    kept_front    = frontier_mask & keep_mask
     removed_front = frontier_mask & (~keep_mask)
 
     updated_seen = seen_grid.copy()
-    # Treat removed micro-frontiers as known
     updated_seen[removed_front] = True
 
     removed_count = int(removed_front.sum())
@@ -448,6 +416,24 @@ def filter_tiny_frontiers(frontier_mask: np.ndarray,
         print(f"[MAP] Filtered out {removed_count} tiny frontier cells (filled as known).")
 
     return kept_front, updated_seen
+
+
+def update_frontier_mask():
+    """Recompute frontier_mask from the current grid_seen and obstacle_mask,
+       filter out tiny frontiers, and ignore blocked goals."""
+    global frontier_mask, grid_seen
+
+    raw_frontiers = find_frontiers_from_seen(grid_seen)
+    raw_frontiers = raw_frontiers & (~obstacle_mask)
+
+    frontier_mask, grid_seen = filter_tiny_frontiers(
+        raw_frontiers,
+        grid_seen,
+        MIN_FRONTIER_UNKNOWN_NEIGHBORS
+    )
+
+    # Never treat blocked cells as frontiers
+    frontier_mask &= ~blocked_goals_mask
 
 
 def dilate_mask(mask: np.ndarray, iterations: int) -> np.ndarray:
@@ -473,64 +459,35 @@ def dilate_mask(mask: np.ndarray, iterations: int) -> np.ndarray:
 
     return out
 
-
-
-# ---------- A* path planner on grid ----------
-
-def astar_path(obstacles: np.ndarray,
-               start: tuple[int, int],
-               goal: tuple[int, int]) -> list[tuple[int, int]] | None:
+def clear_obstacles_under_drones(drone_positions_enu: dict[str, np.ndarray]) -> None:
     """
-    A* on a 4-connected grid.
-    obstacles[y,x] == True means blocked.
-    start, goal are (iy, ix).
-    Returns list of (iy, ix) from start to goal (inclusive), or None.
+    Clear obstacle_mask in a small neighborhood around each drone's current grid cell.
+
+    This helps avoid the drone itself being treated as an obstacle due to any
+    residual self-mapped LiDAR points that slipped through filtering.
     """
-    h, w = obstacles.shape
-    sy, sx = start
-    gy, gx = goal
+    global obstacle_mask
 
-    if not (0 <= sx < w and 0 <= sy < h):
-        return None
-    if not (0 <= gx < w and 0 <= gy < h):
-        return None
-    if obstacles[gy, gx]:
-        return None
+    h, w = obstacle_mask.shape
+    r = OBSTACLE_CLEAR_RADIUS_CELLS
 
-    open_set = []
-    heappush(open_set, (0, (sy, sx)))
-    came_from: dict[tuple[int, int], tuple[int, int] | None] = {(sy, sx): None}
-    g_score = {(sy, sx): 0}
+    for pos in drone_positions_enu.values():
+        x_enu, y_enu = float(pos[0]), float(pos[1])
 
-    def heuristic(y, x):
-        return abs(y - gy) + abs(x - gx)
+        ix = int((x_enu - X_MIN_ENU) / CELL_SIZE)
+        iy = int((y_enu - Y_MIN_ENU) / CELL_SIZE)
+        if not (0 <= ix < w and 0 <= iy < h):
+            continue
 
-    while open_set:
-        _, (cy, cx) = heappop(open_set)
-        if (cy, cx) == (gy, gx):
-            path = []
-            cur = (cy, cx)
-            while cur is not None:
-                path.append(cur)
-                cur = came_from[cur]
-            path.reverse()
-            return path
+        x0 = max(ix - r, 0)
+        x1 = min(ix + r, w - 1)
+        y0 = max(iy - r, 0)
+        y1 = min(iy + r, h - 1)
 
-        for ny, nx in ((cy-1, cx), (cy+1, cx), (cy, cx-1), (cy, cx+1)):
-            if not (0 <= nx < w and 0 <= ny < h):
-                continue
-            if obstacles[ny, nx]:
-                continue
+        obstacle_mask[y0:y1+1, x0:x1+1] = False
 
-            tentative_g = g_score[(cy, cx)] + 1
-            if (ny, nx) not in g_score or tentative_g < g_score[(ny, nx)]:
-                g_score[(ny, nx)] = tentative_g
-                f = tentative_g + heuristic(ny, nx)
-                heappush(open_set, (f, (ny, nx)))
-                came_from[(ny, nx)] = (cy, cx)
 
-    return None
-
+# ---------- Multi-goal Dijkstra path planner on grid ----------
 
 def plan_path_to_frontier_for_drone(drone_pos_enu_xy: np.ndarray,
                                     fm_for_plan: np.ndarray
@@ -547,9 +504,10 @@ def plan_path_to_frontier_for_drone(drone_pos_enu_xy: np.ndarray,
     as soon as we reach ANY frontier cell whose path length corresponds to
     at least MIN_FRONTIER_DIST_M.
 
-    Returns:
-      path      : list[(iy, ix)] from start to chosen goal (inclusive), or None
-      goal_cell : (iy, ix) of that chosen frontier cell, or None
+    Paths are allowed to traverse:
+      - cells that are seen & not obstacles, and
+      - the frontier cell itself (which is unknown but the goal).
+    We do NOT walk through generic unknown cells.
     """
     h, w = grid_seen.shape
 
@@ -566,7 +524,6 @@ def plan_path_to_frontier_for_drone(drone_pos_enu_xy: np.ndarray,
     # Minimum path length in cells to satisfy MIN_FRONTIER_DIST_M
     min_cells = int(MIN_FRONTIER_DIST_M / CELL_SIZE)
 
-    # Standard Dijkstra (A* with heuristic = 0)
     obstacles = obstacle_mask  # use global obstacle mask
     open_set: list[tuple[int, tuple[int, int]]] = []
     heappush(open_set, (0, start))  # (cost, (y, x))
@@ -580,7 +537,6 @@ def plan_path_to_frontier_for_drone(drone_pos_enu_xy: np.ndarray,
         # If this is a valid frontier cell and far enough from start, we are done
         if fm_for_plan[cy, cx] and g_score[(cy, cx)] >= min_cells:
             goal = (cy, cx)
-            # Reconstruct path
             path: list[tuple[int, int]] = []
             cur = goal
             while cur is not None:
@@ -590,11 +546,20 @@ def plan_path_to_frontier_for_drone(drone_pos_enu_xy: np.ndarray,
             print(f"[PLAN] Multi-goal path length {len(path)} to frontier cell {goal}.")
             return path, goal
 
-        # Expand neighbors
+        # Expand neighbors (4-connected)
         for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
             if not (0 <= nx < w and 0 <= ny < h):
                 continue
+
+            # Hard obstacle
             if obstacles[ny, nx]:
+                continue
+
+            # Is this neighbor a candidate frontier cell?
+            is_frontier = fm_for_plan[ny, nx]
+
+            # Unknown + not frontier => don't walk through generic unknown
+            if (not grid_seen[ny, nx]) and (not is_frontier):
                 continue
 
             new_cost = g_score[(cy, cx)] + 1
@@ -607,6 +572,35 @@ def plan_path_to_frontier_for_drone(drone_pos_enu_xy: np.ndarray,
     return None, None
 
 
+def compute_escape_target(drone_xy: np.ndarray,
+                          ref_xy: np.ndarray | None = None) -> np.ndarray:
+    """
+    Compute an escape waypoint in ENU for a drone.
+
+    If ref_xy is provided, escape generally *away* from that point with some
+    sideways jitter. Otherwise, pick a random direction.
+    """
+    if ref_xy is not None:
+        escape_dir = drone_xy - ref_xy
+        norm = np.linalg.norm(escape_dir)
+        if norm < 1e-3:
+            escape_dir = np.array([1.0, 0.0], dtype=np.float32)
+        else:
+            escape_dir = escape_dir / norm
+    else:
+        # No reference: choose a random direction
+        theta = np.random.uniform(0.0, 2.0 * math.pi)
+        escape_dir = np.array([math.cos(theta), math.sin(theta)], dtype=np.float32)
+
+    # add a sideways jitter to avoid oscillations
+    perp = np.array([-escape_dir[1], escape_dir[0]], dtype=np.float32)
+
+    escape_xy = (
+        drone_xy
+        + escape_dir * ESCAPE_BACK_DIST_M
+        + perp * ESCAPE_SIDE_JITTER_M
+    )
+    return escape_xy
 
 
 # ---------- SAVE FINAL MAP (arrays + PNG) ----------
@@ -633,6 +627,7 @@ def save_final_map_and_png():
     out_png = RUN_DIR / "final_coverage.png"
     fig.savefig(out_png, dpi=150)
     print(f"[SAVE] Final coverage PNG saved to {out_png}")
+
 
 # ====================== LIVE VISUALIZATION ======================
 
@@ -685,6 +680,7 @@ def update_visualization():
     fig.canvas.flush_events()
     plt.pause(0.001)
 
+
 # =============================== MAIN ===============================
 
 def main():
@@ -721,46 +717,29 @@ def main():
     last_vis_update  = start_time
     last_plan_time   = start_time
     per_drone_frame_idx = {name: 0 for name in VEHICLES}
-    world_frame_idx      = 0
-    scan_counter         = 0
 
-    # Track last commanded target for each active planner (ENU x,y)
+    # Per-drone planning state
     planner_target_enu: dict[str, np.ndarray | None] = {
         name: None for name in ACTIVE_PLANNERS
     }
-    # Track last chosen frontier cell (grid indices) and repeat count per drone
     planner_goal_cell: dict[str, tuple[int, int] | None] = {
         name: None for name in ACTIVE_PLANNERS
     }
     planner_goal_repeats: dict[str, int] = {
         name: 0 for name in ACTIVE_PLANNERS
     }
-
-    from collections import deque
-    # Track last commanded target for each active planner (ENU x,y)
-    planner_target_enu: dict[str, np.ndarray | None] = {
-        name: None for name in ACTIVE_PLANNERS
-    }
-    # Track last chosen frontier cell (grid indices) and repeat count per drone
-    planner_goal_cell: dict[str, tuple[int, int] | None] = {
-        name: None for name in ACTIVE_PLANNERS
-    }
-    planner_goal_repeats: dict[str, int] = {
-        name: 0 for name in ACTIVE_PLANNERS
-    }
-
-    # NEW: per-drone history of recent goals in ENU (x,y)
     planner_goal_history_enu: dict[str, deque[np.ndarray]] = {
         name: deque(maxlen=GOAL_HISTORY_LEN) for name in ACTIVE_PLANNERS
     }
-
+    last_positions_enu: dict[str, deque[np.ndarray]] = {
+        name: deque(maxlen=STUCK_WINDOW) for name in ACTIVE_PLANNERS
+    }
 
     try:
         while True:
             loop_start = time.time()
-            # all_pts_world_list = []
 
-             # --- 0) Get all drone ENU positions (for self-filtering) ---
+            # --- 0) Get all drone ENU positions (for self-filtering) ---
             drone_positions_enu: dict[str, np.ndarray] = {}
             for name in VEHICLES:
                 drone_enu = get_drone_enu_from_gps(client, name, gps_ref)  # [x, y, z]
@@ -772,24 +751,7 @@ def main():
                     client, name, offsets_enu, drone_positions_enu
                 )
 
-                # DEBUG early
-                # if scan_counter < 20:
-                #     n_pts = pts_world_enu.shape[0]
-                #     if n_pts > 0:
-                #         x_min, x_max = float(pts_world_enu[:, 0].min()), float(pts_world_enu[:, 0].max())
-                #         y_min, y_max = float(pts_world_enu[:, 1].min()), float(pts_world_enu[:, 1].max())
-                #         z_min, z_max = float(pts_world_enu[:, 2].min()), float(pts_world_enu[:, 2].max())
-                #         print(f"[DEBUG] {name}: {n_pts} pts, "
-                #               f"X=[{x_min:.1f},{x_max:.1f}], "
-                #               f"Y=[{y_min:.1f},{y_max:.1f}], "
-                #               f"Z=[{z_min:.1f},{z_max:.1f}]")
-                #     else:
-                #         print(f"[DEBUG] {name}: 0 LiDAR points")
-
                 integrate_points_into_grid(pts_world_enu)
-
-                # if pts_world_enu.size > 0:
-                #     all_pts_world_list.append(pts_world_enu)
 
                 frame_idx = per_drone_frame_idx[name]
                 if frame_idx % LAS_SAVE_EVERY_N_FRAMES == 0 and pts_world_enu.size > 0:
@@ -804,26 +766,12 @@ def main():
 
                 per_drone_frame_idx[name] = frame_idx + 1
 
-            # Periodically write full world snapshot
-            # if scan_counter % WORLD_SAVE_EVERY_N_SCANS == 0 and all_pts_world_list:
-            #     pts_world_all = np.vstack(all_pts_world_list)
-            #     z = pts_world_all[:, 2]
-            #     zmin, zmax = float(z.min()), float(z.max())
-            #     denom = max(zmax - zmin, 1e-6)
-            #     norm = (z - zmin) / denom
-            #     colors = np.column_stack(
-            #         (norm, 0.5 * np.ones_like(norm), 1.0 - norm)
-            #     )
-            #     create_las_frame(WORLD_SNAP_DIR, world_frame_idx, pts_world_all, colors)
-            #     world_frame_idx += 1
-
-            # scan_counter += 1
-
             now = time.time()
 
             # --- 2) Update obstacle + frontier masks + visualization periodically ---
             if now - last_vis_update >= VIS_UPDATE_PERIOD_SEC:
                 update_obstacle_mask()
+                clear_obstacles_under_drones(drone_positions_enu)
                 update_frontier_mask()
                 update_visualization()
 
@@ -841,43 +789,140 @@ def main():
             if now - last_plan_time >= PLAN_PERIOD_SEC:
                 last_plan_time = now
 
-                # If no frontiers at all, don't bother
                 if not frontier_mask.any():
-                    print("[PLAN] No frontiers available – nothing to plan this cycle.")
+                    print("[PLAN] No frontiers available – issuing escape maneuvers for all planners.")
+                    for planner_name in ACTIVE_PLANNERS:
+                        # Current drone pose
+                        drone_enu = get_drone_enu_from_gps(client, planner_name, gps_ref)
+                        drone_xy  = drone_enu[:2]
+
+                        # Use last goal (if any) as a reference to escape away from,
+                        # otherwise escape in a random direction.
+                        history = planner_goal_history_enu[planner_name]
+                        last_goal_xy = history[-1] if len(history) > 0 else None
+
+                        escape_xy = compute_escape_target(drone_xy, ref_xy=last_goal_xy)
+
+                        X_ned_escape = float(escape_xy[1])
+                        Y_ned_escape = float(escape_xy[0])
+
+                        print(f"[ESCAPE] {planner_name}: no global frontiers; "
+                            f"escaping to ENU=({escape_xy[0]:.2f},{escape_xy[1]:.2f}) "
+                            f"NED=({X_ned_escape:.2f},{Y_ned_escape:.2f},{BASE_ALT:.2f})")
+
+                        client.moveToPositionAsync(
+                            X_ned_escape, Y_ned_escape, BASE_ALT, SPEED,
+                            vehicle_name=planner_name
+                        )
+
+                        planner_target_enu[planner_name] = escape_xy
+                        planner_goal_cell[planner_name] = None
+                        planner_goal_repeats[planner_name] = 0
+                        last_positions_enu[planner_name].clear()
+
                 else:
                     for planner_name in ACTIVE_PLANNERS:
                         # Get planner drone position in ENU
                         drone_enu = get_drone_enu_from_gps(client, planner_name, gps_ref)
                         drone_xy  = drone_enu[:2]
 
-                        # If this drone already has a target, only replan once it gets close
+                        # Update recent position history for stuck detection
+                        last_positions_enu[planner_name].append(drone_xy)
+
+                        # If this drone already has a target, use it until close or stuck
                         target_xy = planner_target_enu[planner_name]
                         if target_xy is not None:
-                            # dist_to_target = np.linalg.norm(drone_xy - target_xy)
-                            # if dist_to_target > REPLAN_DIST_EPS_M:
-                            #     # Still en route; skip re-planning for this drone
-                            #     continue
-                            # else:
-                                # Close enough -> clear and pick a new target
-                                planner_target_enu[planner_name] = None
+                            dist_to_target = np.linalg.norm(drone_xy - target_xy)
+
+                            # Stuck detection: far from target, but not moving much
+                            pos_hist = last_positions_enu[planner_name]
+                            if len(pos_hist) == STUCK_WINDOW:
+                                pos_arr = np.stack(pos_hist, axis=0)
+                                moved = np.linalg.norm(pos_arr[-1] - pos_arr[0])
+
+                                if (dist_to_target > STUCK_TARGET_DIST_THRESH_M and
+                                        moved < STUCK_MOVED_THRESH_M):
+                                    # Treat as stuck at current goal
+                                    goal_cell = planner_goal_cell[planner_name]
+                                    if goal_cell is not None:
+                                        gy, gx = goal_cell
+                                        blocked_goals_mask[gy, gx] = True
+                                        print(f"[PLAN] {planner_name}: stuck near goal {goal_cell}; "
+                                            f"marking blocked.")
+
+                                    # Compute and command escape waypoint (away from current target)
+                                    escape_xy = compute_escape_target(drone_xy, ref_xy=target_xy)
+
+                                    X_ned_escape = float(escape_xy[1])
+                                    Y_ned_escape = float(escape_xy[0])
+
+                                    print(f"[ESCAPE] {planner_name}: stuck (moved={moved:.2f}m, "
+                                        f"dist_to_target={dist_to_target:.2f}m). "
+                                        f"Escaping to ENU=({escape_xy[0]:.2f},{escape_xy[1]:.2f}) "
+                                        f"NED=({X_ned_escape:.2f},{Y_ned_escape:.2f},{BASE_ALT:.2f})")
+
+                                    client.moveToPositionAsync(
+                                        X_ned_escape, Y_ned_escape, BASE_ALT, SPEED,
+                                        vehicle_name=planner_name
+                                    )
+
+                                    planner_target_enu[planner_name] = escape_xy
+                                    planner_goal_cell[planner_name] = None
+                                    planner_goal_repeats[planner_name] = 0
+                                    pos_hist.clear()
+
+                                    # Skip new planning this cycle; let the escape run
+                                    continue
+
+                            # If still far from target and not stuck, keep current plan
+                            if dist_to_target > REPLAN_DIST_EPS_M:
+                                continue
+
+                            # Close enough -> clear and pick a new target this cycle
+                            planner_target_enu[planner_name] = None
+                            last_positions_enu[planner_name].clear()
+
+
 
                         # Build a per-drone frontier mask by excluding regions
                         # close to other drones' targets (simple task partition).
                         fm_for_plan = frontier_mask.copy()
-                        # Never consider globally blocked frontier cells
                         fm_for_plan &= ~blocked_goals_mask
                         fm_for_plan &= ~obstacle_mask
 
                         ys_all, xs_all = np.where(fm_for_plan)
                         if len(xs_all) == 0:
+                            # No valid frontiers for this drone, but others might have some.
+                            # Try an escape maneuver for this drone only.
+                            history = planner_goal_history_enu[planner_name]
+                            last_goal_xy = history[-1] if len(history) > 0 else None
+
+                            escape_xy = compute_escape_target(drone_xy, ref_xy=last_goal_xy)
+                            X_ned_escape = float(escape_xy[1])
+                            Y_ned_escape = float(escape_xy[0])
+
+                            print(f"[ESCAPE] {planner_name}: no valid frontiers after masking; "
+                                f"escaping to ENU=({escape_xy[0]:.2f},{escape_xy[1]:.2f}) "
+                                f"NED=({X_ned_escape:.2f},{Y_ned_escape:.2f},{BASE_ALT:.2f})")
+
+                            client.moveToPositionAsync(
+                                X_ned_escape, Y_ned_escape, BASE_ALT, SPEED,
+                                vehicle_name=planner_name
+                            )
+
+                            planner_target_enu[planner_name] = escape_xy
+                            planner_goal_cell[planner_name] = None
+                            planner_goal_repeats[planner_name] = 0
+                            last_positions_enu[planner_name].clear()
                             continue
+
 
                         # Convert frontier cells to ENU centers
                         fx_all = X_MIN_ENU + (xs_all + 0.5) * CELL_SIZE
                         fy_all = Y_MIN_ENU + (ys_all + 0.5) * CELL_SIZE
                         pts_all = np.stack([fx_all, fy_all], axis=1)
 
-                        # --- Existing: inter-drone separation using planner_target_enu[...] ---
+                        # Inter-drone separation using planner_target_enu[...] of others
                         for other_name in ACTIVE_PLANNERS:
                             if other_name == planner_name:
                                 continue
@@ -901,16 +946,12 @@ def main():
                         if not fm_for_plan.any():
                             continue
 
-                        # --- NEW: filter out frontiers near this drone's recent goals ---
+                        # Filter out frontiers near this drone's recent goals
                         history = planner_goal_history_enu[planner_name]
                         if len(history) > 0:
-                            # Stack history into (H,2)
-                            hist_xy = np.stack(list(history), axis=0)  # ENU x,y
-                            # Distances from each frontier cell to each past goal
-                            # pts_all: (F,2), hist_xy: (H,2)
+                            hist_xy = np.stack(list(history), axis=0)
                             diff = pts_all[:, None, :] - hist_xy[None, :, :]
                             dist = np.linalg.norm(diff, axis=2)  # (F,H)
-                            # keep frontiers that are >= radius from ALL past goals
                             min_dist = dist.min(axis=1)
                             keep = min_dist >= GOAL_HISTORY_RADIUS_M
 
@@ -919,8 +960,8 @@ def main():
                             fm_for_plan = fm_new
 
                         if not fm_for_plan.any():
-                            # All frontiers in this drone's history radius; let it skip this cycle
-                            print(f"[PLAN] {planner_name}: all candidate frontiers too close to recent goals.")
+                            print(f"[PLAN] {planner_name}: all candidate frontiers too close "
+                                  f"to recent goals.")
                             continue
 
                         path, goal_cell = plan_path_to_frontier_for_drone(drone_xy, fm_for_plan)
@@ -928,7 +969,7 @@ def main():
                             print(f"[PLAN] {planner_name}: no valid frontier path this cycle.")
                             continue
 
-                        # --- NEW: repeat-count logic for this drone & goal ---
+                        # Repeat-count logic for this drone & goal
                         prev_goal = planner_goal_cell[planner_name]
                         if prev_goal == goal_cell:
                             planner_goal_repeats[planner_name] += 1
@@ -940,14 +981,11 @@ def main():
                             gy, gx = goal_cell
                             blocked_goals_mask[gy, gx] = True
                             print(f"[PLAN] {planner_name}: frontier {goal_cell} exceeded repeat cap "
-                                f"({MAX_GOAL_REPEATS}); marking blocked.")
-                            # Reset this drone's goal; it will choose something else next cycle
+                                  f"({MAX_GOAL_REPEATS}); marking blocked.")
                             planner_goal_cell[planner_name] = None
                             planner_target_enu[planner_name] = None
                             planner_goal_repeats[planner_name] = 0
-                            # Skip issuing a movement command this cycle; we'll replan next time
                             continue
-                        # --- END NEW ---
 
                         if len(path) <= 1:
                             print(f"[PLAN] {planner_name}: path only start cell; skipping.")
@@ -960,12 +998,13 @@ def main():
                         y_enu = Y_MIN_ENU + (iy + 0.5) * CELL_SIZE
                         target_xy = np.array([x_enu, y_enu], dtype=np.float32)
 
+                        # Convert ENU -> NED (assuming same origin, swapped axes)
                         X_ned = float(y_enu)
                         Y_ned = float(x_enu)
 
                         print(f"[MOVE] {planner_name}: to grid (iy={iy}, ix={ix}) "
-                            f"ENU=({x_enu:.2f},{y_enu:.2f}) "
-                            f"NED=({X_ned:.2f},{Y_ned:.2f},{BASE_ALT:.2f})")
+                              f"ENU=({x_enu:.2f},{y_enu:.2f}) "
+                              f"NED=({X_ned:.2f},{Y_ned:.2f},{BASE_ALT:.2f})")
 
                         client.moveToPositionAsync(
                             X_ned, Y_ned, BASE_ALT, SPEED,
@@ -979,8 +1018,6 @@ def main():
                         goal_y_enu = Y_MIN_ENU + (gy + 0.5) * CELL_SIZE
                         goal_xy_enu = np.array([goal_x_enu, goal_y_enu], dtype=np.float32)
                         planner_goal_history_enu[planner_name].append(goal_xy_enu)
-
-
 
             # --- 4) Sleep to maintain SCAN_INTERVAL_SEC ---
             elapsed = time.time() - loop_start
