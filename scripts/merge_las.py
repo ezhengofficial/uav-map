@@ -17,12 +17,13 @@ def find_logs_root(script_path: Path, explicit: Path | None) -> Path:
     return latest
 
 def merge_las_files(input_dir: Path, output_file: Path):
-    files = sorted(input_dir.glob("*.las"))
+    # Recursively find all .las files (handles per-drone subfolders)
+    files = sorted(input_dir.rglob("*.las"))
     if not files:
-        print(f"[ERROR] No LAS files found in {input_dir}")
+        print(f"[ERROR] No LAS files found under {input_dir}")
         sys.exit(1)
 
-    print(f"[INFO] Found {len(files)} LAS files in {input_dir}")
+    print(f"[INFO] Found {len(files)} LAS files under {input_dir}")
 
     merged_points = []
     merged_colors = []
@@ -36,7 +37,7 @@ def merge_las_files(input_dir: Path, output_file: Path):
         merged_points.append(pts)
         if hasattr(las, "red"):
             merged_colors.append(np.vstack((las.red, las.green, las.blue)).T)
-        print(f"[INFO] Loaded {f.name}: {len(pts):,} points")
+        print(f"[INFO] Loaded {f.relative_to(input_dir)}: {len(pts):,} points")
 
     merged_points = np.vstack(merged_points)
     merged_colors = np.vstack(merged_colors) if merged_colors else None
@@ -66,7 +67,7 @@ def merge_las_files(input_dir: Path, output_file: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="Merge multiple LAS files into a single LAS/LAZ file.")
-    parser.add_argument("--logs", type=str, default=None, help="Path to folder with LAS frames (default: latest in data/logs/).")
+    parser.add_argument("--logs", type=str, default=None, help="Path to run folder (default: latest in data/logs/).")
     parser.add_argument("--outfile", type=str, default=None, help="Output .las or .laz file path.")
     parser.add_argument("--compress", action="store_true", help="Write compressed LAZ output (requires laspy[laszip] or LAZ support).")
     args = parser.parse_args()
