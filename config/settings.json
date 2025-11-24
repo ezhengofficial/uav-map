@@ -1,30 +1,13 @@
 {
 	"SeeDocsAt": "https://github.com/Microsoft/AirSim/blob/main/docs/settings.md",
-	"SettingsVersion": 1.2,
-	"SimMode": "Multirotor",
-	"ClockSpeed": 1,
-	
-	"Vehicles": {
-		"Drone1": {
-		  "VehicleType": "SimpleFlight",
-		  "X": 4, "Y": 0, "Z": -2,
-      "Sensors": {
-          "Lidar1": {
-            "SensorType": 6,
-            "Enabled": true,
-            "NumberOfChannels": 16,
-            "PointsPerSecond": 30000,
-            "Range": 60,
-            "VerticalFOVUpper": 10,
-            "VerticalFOVLower": -10,
-            "HorizontalRotationFrequency": 10,
-            "DrawDebugPoints": false
-          }
-		    }
-      },
-		"Drone2": {
-		  "VehicleType": "SimpleFlight",
-		  "X": 8, "Y": 0, "Z": -2,
+  "SettingsVersion": 1.2,
+  "ClockSpeed": 3.0,
+  "SimMode": "Multirotor",
+  "Vehicles": {
+    "Drone1": {
+      "VehicleType": "SimpleFlight",
+      "AutoCreate": true,
+      "X": 0, "Y": 0, "Z": 0,
       "Sensors": {
         "Lidar1": {
           "SensorType": 6,
@@ -33,7 +16,43 @@
           "PointsPerSecond": 30000,
           "Range": 60,
           "VerticalFOVUpper": 10,
-          "VerticalFOVLower": -10,
+          "VerticalFOVLower": -15,
+          "HorizontalRotationFrequency": 10,
+          "DrawDebugPoints": false
+        }
+      }
+    },
+    "Drone2": {
+      "VehicleType": "SimpleFlight",
+      "AutoCreate": true,
+      "X": 5, "Y": 40, "Z": 0,
+      "Sensors": {
+        "Lidar1": {
+          "SensorType": 6,
+          "Enabled": true,
+          "NumberOfChannels": 16,
+          "PointsPerSecond": 30000,
+          "Range": 60,
+          "VerticalFOVUpper": 10,
+          "VerticalFOVLower": -15,
+          "HorizontalRotationFrequency": 10,
+          "DrawDebugPoints": false
+        }
+      }
+    },
+    "Drone3": {
+      "VehicleType": "SimpleFlight",
+      "AutoCreate": true,
+      "X": -5, "Y": -40, "Z": 0,
+      "Sensors": {
+        "Lidar1": {
+          "SensorType": 6,
+          "Enabled": true,
+          "NumberOfChannels": 16,
+          "PointsPerSecond": 30000,
+          "Range": 60,
+          "VerticalFOVUpper": 10,
+          "VerticalFOVLower": -15,
           "HorizontalRotationFrequency": 10,
           "DrawDebugPoints": false
         }
@@ -41,3 +60,4 @@
     }
   }
 }
+
