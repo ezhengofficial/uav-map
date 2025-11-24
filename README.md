@@ -36,13 +36,24 @@ Instructions to help set up the project locally and run it
     cd uav-map
     ```
 
-2. Install dependencies
+2. Setup Virtual environment
+
+3. Install dependencies
     ```sh
     pip install -r requirements.txt
     ```
 
-3. Setup `settings.json`
-    * An example of `settings.json` can be found [here](config/settings.json)
+4. Create/copy `settings.json` into:
+
+   ```
+   C:\Users\<you>\Documents\AirSim\settings.json
+   ```
+   or OneDrive variant.
+   ```
+   C:\Users\<you>\OneDrive\Documents\AirSim\settings.json
+   ```
+
+    * `settings.json` can be found [here](config/settings.json)
 
 4. Launch AirSim Simulator
     * `Blocks.exe` for this project
