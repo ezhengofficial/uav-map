@@ -1,13 +1,6 @@
 """
-Merge LiDAR data from multiple drones into a single aligned point cloud.
-
-Since all drones now save data in a shared world ENU frame (via GPS calibration),
-merging is simply concatenating all points.
-
 Usage:
     python merge_lidar.py                    # Merge all drones
-    python merge_lidar.py --output merged.las
-    python merge_lidar.py --drones Drone1 Drone2
 """
 import argparse
 from pathlib import Path

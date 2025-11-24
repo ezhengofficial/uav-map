@@ -28,7 +28,7 @@ def run_interactive(manager: DroneManager):
     print("  l - Land")
     print("  s - Stop/hover")
     print("  c - Calibrate GPS")
-    print("  x - Start exploration")
+    print("  x - Start exploration [horizontal/vertical]")
     print("  p - Status")
     print("  q - Quit")
     print("="*50 + "\n")
@@ -46,7 +46,7 @@ def run_interactive(manager: DroneManager):
             elif cmd == 'c':
                 manager.calibrate_gps_origin()
             elif cmd == 'x':
-                strategy = input("Strategy [quadrant]: ").strip() or "quadrant"
+                strategy = input("Parition Strategy: ").strip()
                 manager.start_exploration(partition_strategy=strategy)
             elif cmd == 'p':
                 for name, active in manager.get_exploration_status().items():

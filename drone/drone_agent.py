@@ -1,9 +1,3 @@
-"""
-Enhanced DroneAgent with COMPLETELY FIXED GPS-based world alignment.
-All drones save points in a shared world frame using GPS calibration.
-
-COMPLETE FIX: Proper GPS-to-world coordinate transformation
-"""
 import os
 import time
 import math

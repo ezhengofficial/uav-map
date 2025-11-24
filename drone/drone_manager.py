@@ -1,6 +1,3 @@
-"""
-DroneManager with CORRECTED GPS calibration and LiDAR sensor configuration parsing.
-"""
 import json
 import os
 import time
@@ -45,7 +42,7 @@ class DroneManager:
 
     def _parse_settings(self, settings_file: Optional[str]):
         """
-        FIXED: Properly extract LiDAR sensor position AND orientation from settings.json
+        Properly extract LiDAR sensor position AND orientation from settings.json
         """
         if settings_file is None:
             candidates = [
