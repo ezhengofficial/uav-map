@@ -77,7 +77,7 @@ Instructions to help set up the project locally and run it
     * To see some results for the modular aspect, run 
     ```sh
     cd drone
-    python main.py
+    python main.py --setings [PATH_TO_SETTINGS_JSON_FILE]
     ```
     Followed by the following input
     ```
