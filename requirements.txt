@@ -6,3 +6,4 @@ open3d>=0.19.0
 laspy>=2.5.0
 flask=3.1.2
 matplotlib>=3.10.0
+scipy>=1.16.3
