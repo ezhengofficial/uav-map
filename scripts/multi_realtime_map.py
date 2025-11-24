@@ -22,12 +22,12 @@ SPEED      = 4.0     # m/s
 SCAN_INTERVAL_SEC        = 0.5     # how often we grab LiDAR from each drone
 
 # Global ENU grid (meters) around reference (Drone1 GPS)
-X_MIN_ENU, X_MAX_ENU = -120.0, 120.0
-Y_MIN_ENU, Y_MAX_ENU = -120.0, 120.0
+X_MIN_ENU, X_MAX_ENU = -100.0, 100.0
+Y_MIN_ENU, Y_MAX_ENU = -100.0, 100.0
 CELL_SIZE            = 0.8   # m per cell
 
 # Visualization
-VIS_UPDATE_PERIOD_SEC = 3.0  # how often to refresh the 2D grid image
+VIS_UPDATE_PERIOD_SEC = 1.0  # how often to refresh the 2D grid image
 
 # Height-aware obstacle mapping
 MIN_HIT_COUNT_FOR_OBSTACLE = 10      # min number of points in a cell
