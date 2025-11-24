@@ -86,7 +86,7 @@ R_EARTH = 6378137.0
 SAVE_ROOT = Path(__file__).resolve().parents[1] / "data" / "logs"
 SAVE_ROOT.mkdir(parents=True, exist_ok=True)
 RUN_ID  = datetime.now().strftime("%Y%m%d_%H%M%S")
-RUN_DIR = SAVE_ROOT / RUN_ID
+RUN_DIR = SAVE_ROOT
 RUN_DIR.mkdir(parents=True, exist_ok=True)
 print(f"[INFO] Realtime multi-drone map run dir: {RUN_DIR}")
 
