@@ -16,18 +16,19 @@ VEHICLES   = ["Drone1", "Drone2", "Drone3"]
 LIDAR_NAME = "Lidar1"
 
 BASE_ALT   = -7.0    # NED (negative = up)
-SPEED      = 4.0     # m/s
+SPEED      = 4.0      # m/s
 
 # Scan / update timing
 SCAN_INTERVAL_SEC        = 0.5     # how often we grab LiDAR from each drone
+LAS_SAVE_EVERY_N_FRAMES  = 1       # per-drone LAS for debugging/logging
 
 # Global ENU grid (meters) around reference (Drone1 GPS)
-X_MIN_ENU, X_MAX_ENU = -100.0, 100.0
-Y_MIN_ENU, Y_MAX_ENU = -100.0, 100.0
+X_MIN_ENU, X_MAX_ENU = -120.0, 120.0
+Y_MIN_ENU, Y_MAX_ENU = -120.0, 120.0
 CELL_SIZE            = 0.8   # m per cell
 
 # Visualization
-VIS_UPDATE_PERIOD_SEC = 1.0  # how often to refresh the 2D grid image
+VIS_UPDATE_PERIOD_SEC = 3.0  # how often to refresh the 2D grid image
 
 # Height-aware obstacle mapping
 MIN_HIT_COUNT_FOR_OBSTACLE = 10      # min number of points in a cell
@@ -62,18 +63,18 @@ GOAL_HISTORY_LEN      = 5
 MAX_GOAL_REPEATS = 2
 
 # Stuck detection (per-drone)
-STUCK_WINDOW               = 10     # number of recent positions to track
-STUCK_MOVED_THRESH_M       = 0.5    # total movement below this → "not moving"
-STUCK_TARGET_DIST_THRESH_M = 10.0   # still far from target → possibly stuck
+STUCK_WINDOW            = 10     # number of recent positions to track
+STUCK_MOVED_THRESH_M    = 0.5    # total movement below this → "not moving"
+STUCK_TARGET_DIST_THRESH_M = 10.0  # still far from target → possibly stuck
 
 # Obstacle inflation / safety bubble (in grid cells)
 # Slightly inflate walls to reduce "threading the needle" through narrow gaps
-WALL_DILATE_ITERS     = 1   # grow "hard" obstacles by N cells (0 disables thickening)
-OBSTACLE_DILATE_ITERS = 0   # further inflate for safety (no-fly) (0 disables)
+WALL_DILATE_ITERS     = 1   # grow "hard" obstacles by N cells
+OBSTACLE_DILATE_ITERS = 0   # further inflate for safety (no-fly)
 
-# Escape maneuver when stuck or no frontiers
+# Escape maneuver when stuck
 ESCAPE_BACK_DIST_M   = 10.0   # how far to move away from the blocked goal
-ESCAPE_SIDE_JITTER_M = 10.0    # sideways jitter to avoid oscillations
+ESCAPE_SIDE_JITTER_M = 2.0   # sideways jitter to avoid oscillations
 
 # Clear obstacles under drones so they don't block themselves
 OBSTACLE_CLEAR_RADIUS_CELLS = 1     # radius (in cells) to clear around each drone
@@ -81,7 +82,7 @@ OBSTACLE_CLEAR_RADIUS_CELLS = 1     # radius (in cells) to clear around each dro
 # WGS84 Earth radius for GPS->ENU
 R_EARTH = 6378137.0
 
-# Logs / run directory
+# Logs
 SAVE_ROOT = Path(__file__).resolve().parents[1] / "data" / "logs"
 SAVE_ROOT.mkdir(parents=True, exist_ok=True)
 RUN_ID  = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -89,12 +90,13 @@ RUN_DIR = SAVE_ROOT
 RUN_DIR.mkdir(parents=True, exist_ok=True)
 print(f"[INFO] Realtime multi-drone map run dir: {RUN_DIR}")
 
-# Global accumulator for all ENU points (for final dense cloud + realtime snapshots)
-GLOBAL_POINTS: list[np.ndarray] = []
-
-# Realtime global LAS export (single file, overwritten periodically)
-ENABLE_REALTIME_LAS       = True
-REALTIME_LAS_PERIOD_SEC   = 5.0   # how often to overwrite realtime LAS (seconds)
+# Per-drone subfolders (for periodic LAS logs)
+DRONE_DIRS: dict[str, Path] = {}
+for name in VEHICLES:
+    ddir = RUN_DIR / name
+    ddir.mkdir(parents=True, exist_ok=True)
+    DRONE_DIRS[name] = ddir
+    print(f"[INFO]  - {name} LAS logs -> {ddir}")
 
 # ====================== COORD HELPERS ======================
 
@@ -226,6 +228,71 @@ def integrate_points_into_grid(points_enu: np.ndarray) -> None:
     np.add.at(hit_count, (iy, ix), 1)
 
 
+def create_las_frame(out_dir: Path,
+                     frame_idx: int,
+                     points_enu: np.ndarray,
+                     colors: np.ndarray | None = None) -> None:
+    """
+    Write one ENU-frame LiDAR snapshot to LAS in the given directory.
+    (Used periodically for logging.)
+    """
+    if points_enu.size == 0:
+        return
+
+    header = laspy.LasHeader(point_format=3, version="1.2")
+    header.scales = np.array([0.01, 0.01, 0.01])
+    header.offsets = np.array([
+        float(np.min(points_enu[:, 0])),
+        float(np.min(points_enu[:, 1])),
+        float(np.min(points_enu[:, 2])),
+    ])
+
+    las = laspy.LasData(header)
+    las.x = points_enu[:, 0]
+    las.y = points_enu[:, 1]
+    las.z = points_enu[:, 2]
+
+    if colors is not None and len(colors) == len(points_enu):
+        rgb16 = (np.clip(colors, 0.0, 1.0) * 65535.0 + 0.5).astype(np.uint16)
+        las.red   = rgb16[:, 0]
+        las.green = rgb16[:, 1]
+        las.blue  = rgb16[:, 2]
+
+    out_path = out_dir / f"lidar_{frame_idx:04d}.las"
+    las.write(str(out_path))
+
+
+def liDAR_to_world_enu_for_drone(client: airsim.MultirotorClient,
+                                 vehicle_name: str,
+                                 offsets_enu: dict[str, np.ndarray],
+                                 drone_positions_enu: dict[str, np.ndarray]) -> np.ndarray:
+    """
+    Get LiDAR data for one drone, convert local NED -> local ENU,
+    then apply static ENU translation so all drones align in a common world frame.
+    Also filters out points that likely hit any drone body.
+    Assumes LiDAR DataFrame is VehicleInertialFrame (already orientation/motion-compensated).
+    """
+    lidar_data = client.getLidarData(vehicle_name=vehicle_name, lidar_name=LIDAR_NAME)
+    if not lidar_data.point_cloud:
+        return np.empty((0, 3), dtype=np.float32)
+
+    pts_local_ned = np.array(lidar_data.point_cloud, dtype=np.float32).reshape(-1, 3)
+    pts_local_enu = ned_to_enu(pts_local_ned)
+
+    offset = offsets_enu.get(vehicle_name, np.zeros(3, dtype=np.float32))
+    pts_world_enu = pts_local_enu + offset
+
+    # Remove points near drone bodies (including this one)
+    pts_world_enu = filter_points_near_drones(
+        pts_world_enu,
+        drone_positions_enu,
+        DRONE_BODY_RADIUS_M,
+        DRONE_BODY_Z_MARGIN_M,
+    )
+
+    return pts_world_enu
+
+
 def filter_points_near_drones(points_enu: np.ndarray,
                               drone_positions_enu: dict[str, np.ndarray],
                               radius_m: float,
@@ -262,61 +329,7 @@ def filter_points_near_drones(points_enu: np.ndarray,
     return points_enu[keep]
 
 
-def liDAR_to_world_enu_for_drone(client: airsim.MultirotorClient,
-                                 vehicle_name: str,
-                                 offsets_enu: dict[str, np.ndarray],
-                                 drone_positions_enu: dict[str, np.ndarray]) -> np.ndarray:
-    """
-    Get LiDAR data for one drone, convert local NED -> local ENU,
-    then apply static ENU translation so all drones align in a common world frame.
-    Also filters out points that likely hit any drone body.
-    Assumes LiDAR frame is VehicleInertialFrame (already orientation/motion-compensated).
-    """
-    lidar_data = client.getLidarData(vehicle_name=vehicle_name, lidar_name=LIDAR_NAME)
-    if not lidar_data.point_cloud:
-        return np.empty((0, 3), dtype=np.float32)
-
-    pts_local_ned = np.array(lidar_data.point_cloud, dtype=np.float32).reshape(-1, 3)
-    pts_local_enu = ned_to_enu(pts_local_ned)
-
-    offset = offsets_enu.get(vehicle_name, np.zeros(3, dtype=np.float32))
-    pts_world_enu = pts_local_enu + offset
-
-    # Remove points near drone bodies (including this one)
-    pts_world_enu = filter_points_near_drones(
-        pts_world_enu,
-        drone_positions_enu,
-        DRONE_BODY_RADIUS_M,
-        DRONE_BODY_Z_MARGIN_M,
-    )
-
-    return pts_world_enu
-
 # ---------- height-aware obstacles + frontiers ----------
-
-def dilate_mask(mask: np.ndarray, iterations: int) -> np.ndarray:
-    """
-    4-connected dilation on a boolean mask.
-
-    Each iteration grows True cells to their up/down/left/right neighbors.
-    """
-    if iterations <= 0:
-        return mask
-
-    h, w = mask.shape
-    out = mask.copy()
-
-    for _ in range(iterations):
-        p = np.pad(out, 1, mode="constant", constant_values=False)
-        up    = p[0:h,   1:w+1]
-        down  = p[2:h+2, 1:w+1]
-        left  = p[1:h+1, 0:w]
-        right = p[1:h+1, 2:w+2]
-        grown = up | down | left | right
-        out = out | grown
-
-    return out
-
 
 def update_obstacle_mask():
     """
@@ -363,7 +376,7 @@ def find_frontiers_from_seen(seen: np.ndarray) -> np.ndarray:
     return frontiers
 
 
-def filter_tiny_frontiers(frontier_mask_in: np.ndarray,
+def filter_tiny_frontiers(frontier_mask: np.ndarray,
                           seen_grid: np.ndarray,
                           min_unknown_neighbors: int
                           ) -> tuple[np.ndarray, np.ndarray]:
@@ -392,8 +405,8 @@ def filter_tiny_frontiers(frontier_mask_in: np.ndarray,
     )
 
     keep_mask     = local_unknown >= min_unknown_neighbors
-    kept_front    = frontier_mask_in & keep_mask
-    removed_front = frontier_mask_in & (~keep_mask)
+    kept_front    = frontier_mask & keep_mask
+    removed_front = frontier_mask & (~keep_mask)
 
     updated_seen = seen_grid.copy()
     updated_seen[removed_front] = True
@@ -422,6 +435,29 @@ def update_frontier_mask():
     # Never treat blocked cells as frontiers
     frontier_mask &= ~blocked_goals_mask
 
+
+def dilate_mask(mask: np.ndarray, iterations: int) -> np.ndarray:
+    """
+    4-connected dilation on a boolean mask.
+
+    Each iteration grows True cells to their up/down/left/right neighbors.
+    """
+    if iterations <= 0:
+        return mask
+
+    h, w = mask.shape
+    out = mask.copy()
+
+    for _ in range(iterations):
+        p = np.pad(out, 1, mode="constant", constant_values=False)
+        up    = p[0:h,   1:w+1]
+        down  = p[2:h+2, 1:w+1]
+        left  = p[1:h+1, 0:w]
+        right = p[1:h+1, 2:w+2]
+        grown = up | down | left | right
+        out = out | grown
+
+    return out
 
 def clear_obstacles_under_drones(drone_positions_enu: dict[str, np.ndarray]) -> None:
     """
@@ -566,46 +602,6 @@ def compute_escape_target(drone_xy: np.ndarray,
     )
     return escape_xy
 
-# ---------- GLOBAL POINT CLOUD SAVE HELPERS ----------
-
-def _build_global_points_array() -> np.ndarray | None:
-    """
-    Stack all accumulated ENU points into a single (N, 3) array.
-    Returns None if no points were collected.
-    """
-    if not GLOBAL_POINTS:
-        return None
-    return np.vstack(GLOBAL_POINTS).astype(np.float32)
-
-
-def save_global_point_cloud_las(out_path: Path) -> None:
-    """
-    Save the accumulated global ENU point cloud to a LAS file at out_path.
-    Always overwrites the file if it exists.
-    """
-    pts_all = _build_global_points_array()
-    if pts_all is None or pts_all.size == 0:
-        print(f"[SAVE] No global points accumulated; skipping LAS export: {out_path}")
-        return
-
-    print(f"[SAVE] Global point cloud: {pts_all.shape[0]:,} points -> {out_path.name}")
-
-    header = laspy.LasHeader(point_format=3, version="1.2")
-    header.scales = np.array([0.01, 0.01, 0.01], dtype=np.float64)
-    header.offsets = np.array([
-        float(pts_all[:, 0].min()),
-        float(pts_all[:, 1].min()),
-        float(pts_all[:, 2].min()),
-    ], dtype=np.float64)
-
-    las = laspy.LasData(header)
-    las.x = pts_all[:, 0]
-    las.y = pts_all[:, 1]
-    las.z = pts_all[:, 2]
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    las.write(str(out_path))
-    print(f"[SAVE] Wrote LAS: {out_path}")
 
 # ---------- SAVE FINAL MAP (arrays + PNG) ----------
 
@@ -631,6 +627,7 @@ def save_final_map_and_png():
     out_png = RUN_DIR / "final_coverage.png"
     fig.savefig(out_png, dpi=150)
     print(f"[SAVE] Final coverage PNG saved to {out_png}")
+
 
 # ====================== LIVE VISUALIZATION ======================
 
@@ -716,10 +713,10 @@ def main():
     offsets_enu, gps_ref = calibrate_static_offsets_enu(client)
 
     print("[INFO] Entering realtime LiDAR scan + map + frontier-planning loop...")
-    now = time.time()
-    last_vis_update        = now
-    last_plan_time         = now
-    last_realtime_las_time = now
+    start_time       = time.time()
+    last_vis_update  = start_time
+    last_plan_time   = start_time
+    per_drone_frame_idx = {name: 0 for name in VEHICLES}
 
     # Per-drone planning state
     planner_target_enu: dict[str, np.ndarray | None] = {
@@ -742,13 +739,13 @@ def main():
         while True:
             loop_start = time.time()
 
-            # --- 0) Get all drone ENU positions (for self-filtering + planning) ---
+            # --- 0) Get all drone ENU positions (for self-filtering) ---
             drone_positions_enu: dict[str, np.ndarray] = {}
             for name in VEHICLES:
                 drone_enu = get_drone_enu_from_gps(client, name, gps_ref)  # [x, y, z]
                 drone_positions_enu[name] = drone_enu
 
-            # --- 1) Scan all drones, integrate into grid, accumulate global points ---
+            # --- 1) Scan all drones, integrate into grid, optionally log LAS ---
             for name in VEHICLES:
                 pts_world_enu = liDAR_to_world_enu_for_drone(
                     client, name, offsets_enu, drone_positions_enu
@@ -756,9 +753,18 @@ def main():
 
                 integrate_points_into_grid(pts_world_enu)
 
-                # Accumulate into global point list for final dense cloud + realtime snapshots
-                if pts_world_enu.size > 0:
-                    GLOBAL_POINTS.append(pts_world_enu.astype(np.float32, copy=True))
+                frame_idx = per_drone_frame_idx[name]
+                if frame_idx % LAS_SAVE_EVERY_N_FRAMES == 0 and pts_world_enu.size > 0:
+                    z = pts_world_enu[:, 2]
+                    zmin, zmax = float(z.min()), float(z.max())
+                    denom = max(zmax - zmin, 1e-6)
+                    norm = (z - zmin) / denom
+                    colors = np.column_stack(
+                        (norm, 0.5 * np.ones_like(norm), 1.0 - norm)
+                    )
+                    create_las_frame(DRONE_DIRS[name], frame_idx, pts_world_enu, colors)
+
+                per_drone_frame_idx[name] = frame_idx + 1
 
             now = time.time()
 
@@ -779,12 +785,6 @@ def main():
                       f"obstacles={num_obstacles}, frontiers={num_frontiers}")
                 last_vis_update = now
 
-            # --- 2b) Periodically overwrite realtime LAS snapshot ---
-            if ENABLE_REALTIME_LAS and (now - last_realtime_las_time) >= REALTIME_LAS_PERIOD_SEC:
-                realtime_path = RUN_DIR / "world_realtime.las"
-                save_global_point_cloud_las(realtime_path)
-                last_realtime_las_time = now
-
             # --- 3) Frontier-based planning & motion for all ACTIVE_PLANNERS ---
             if now - last_plan_time >= PLAN_PERIOD_SEC:
                 last_plan_time = now
@@ -793,7 +793,11 @@ def main():
                     print("[PLAN] No frontiers available – issuing escape maneuvers for all planners.")
                     for planner_name in ACTIVE_PLANNERS:
                         # Current drone pose
-                        drone_xy  = drone_positions_enu[planner_name][:2]
+                        drone_enu = get_drone_enu_from_gps(client, planner_name, gps_ref)
+                        drone_xy  = drone_enu[:2]
+
+                        # Use last goal (if any) as a reference to escape away from,
+                        # otherwise escape in a random direction.
                         history = planner_goal_history_enu[planner_name]
                         last_goal_xy = history[-1] if len(history) > 0 else None
 
@@ -803,8 +807,8 @@ def main():
                         Y_ned_escape = float(escape_xy[0])
 
                         print(f"[ESCAPE] {planner_name}: no global frontiers; "
-                              f"escaping to ENU=({escape_xy[0]:.2f},{escape_xy[1]:.2f}) "
-                              f"NED=({X_ned_escape:.2f},{Y_ned_escape:.2f},{BASE_ALT:.2f})")
+                            f"escaping to ENU=({escape_xy[0]:.2f},{escape_xy[1]:.2f}) "
+                            f"NED=({X_ned_escape:.2f},{Y_ned_escape:.2f},{BASE_ALT:.2f})")
 
                         client.moveToPositionAsync(
                             X_ned_escape, Y_ned_escape, BASE_ALT, SPEED,
@@ -818,8 +822,9 @@ def main():
 
                 else:
                     for planner_name in ACTIVE_PLANNERS:
-                        # Get planner drone position in ENU (re-use positions)
-                        drone_xy  = drone_positions_enu[planner_name][:2]
+                        # Get planner drone position in ENU
+                        drone_enu = get_drone_enu_from_gps(client, planner_name, gps_ref)
+                        drone_xy  = drone_enu[:2]
 
                         # Update recent position history for stuck detection
                         last_positions_enu[planner_name].append(drone_xy)
@@ -843,7 +848,7 @@ def main():
                                         gy, gx = goal_cell
                                         blocked_goals_mask[gy, gx] = True
                                         print(f"[PLAN] {planner_name}: stuck near goal {goal_cell}; "
-                                              f"marking blocked.")
+                                            f"marking blocked.")
 
                                     # Compute and command escape waypoint (away from current target)
                                     escape_xy = compute_escape_target(drone_xy, ref_xy=target_xy)
@@ -852,9 +857,9 @@ def main():
                                     Y_ned_escape = float(escape_xy[0])
 
                                     print(f"[ESCAPE] {planner_name}: stuck (moved={moved:.2f}m, "
-                                          f"dist_to_target={dist_to_target:.2f}m). "
-                                          f"Escaping to ENU=({escape_xy[0]:.2f},{escape_xy[1]:.2f}) "
-                                          f"NED=({X_ned_escape:.2f},{Y_ned_escape:.2f},{BASE_ALT:.2f})")
+                                        f"dist_to_target={dist_to_target:.2f}m). "
+                                        f"Escaping to ENU=({escape_xy[0]:.2f},{escape_xy[1]:.2f}) "
+                                        f"NED=({X_ned_escape:.2f},{Y_ned_escape:.2f},{BASE_ALT:.2f})")
 
                                     client.moveToPositionAsync(
                                         X_ned_escape, Y_ned_escape, BASE_ALT, SPEED,
@@ -877,6 +882,8 @@ def main():
                             planner_target_enu[planner_name] = None
                             last_positions_enu[planner_name].clear()
 
+
+
                         # Build a per-drone frontier mask by excluding regions
                         # close to other drones' targets (simple task partition).
                         fm_for_plan = frontier_mask.copy()
@@ -895,8 +902,8 @@ def main():
                             Y_ned_escape = float(escape_xy[0])
 
                             print(f"[ESCAPE] {planner_name}: no valid frontiers after masking; "
-                                  f"escaping to ENU=({escape_xy[0]:.2f},{escape_xy[1]:.2f}) "
-                                  f"NED=({X_ned_escape:.2f},{Y_ned_escape:.2f},{BASE_ALT:.2f})")
+                                f"escaping to ENU=({escape_xy[0]:.2f},{escape_xy[1]:.2f}) "
+                                f"NED=({X_ned_escape:.2f},{Y_ned_escape:.2f},{BASE_ALT:.2f})")
 
                             client.moveToPositionAsync(
                                 X_ned_escape, Y_ned_escape, BASE_ALT, SPEED,
@@ -908,6 +915,7 @@ def main():
                             planner_goal_repeats[planner_name] = 0
                             last_positions_enu[planner_name].clear()
                             continue
+
 
                         # Convert frontier cells to ENU centers
                         fx_all = X_MIN_ENU + (xs_all + 0.5) * CELL_SIZE
@@ -974,7 +982,6 @@ def main():
                             blocked_goals_mask[gy, gx] = True
                             print(f"[PLAN] {planner_name}: frontier {goal_cell} exceeded repeat cap "
                                   f"({MAX_GOAL_REPEATS}); marking blocked.")
-                            # Reset this drone's goal; it will choose something else next cycle
                             planner_goal_cell[planner_name] = None
                             planner_target_enu[planner_name] = None
                             planner_goal_repeats[planner_name] = 0
@@ -1021,10 +1028,8 @@ def main():
     except KeyboardInterrupt:
         print("\n[INFO] KeyboardInterrupt – exiting realtime loop.")
 
-    # Save final map and final dense LAS before landing/shutdown
+    # Save final map before landing/shutdown
     save_final_map_and_png()
-    final_las_path = RUN_DIR / "world_global_dense.las"
-    save_global_point_cloud_las(final_las_path)
 
     print("[INFO] Landing all drones...")
     land_futs = [client.landAsync(vehicle_name=name) for name in VEHICLES]
